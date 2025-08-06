@@ -1,0 +1,14 @@
+# Essential dependencies for MVP
+python-dotenv
+pydantic
+
+# LangChain & LangGraph (latest stable versions)
+langchain
+langchain-openai
+langchain-anthropic
+langgraph
+langgraph-cli
+langsmith
+
+# Logging
+structlog
