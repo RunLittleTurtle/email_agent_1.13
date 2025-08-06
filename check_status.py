@@ -12,10 +12,10 @@ async def check_workflow_status():
     print("🔍 Checking Workflow Status")
     print("=" * 30)
     
-    # Use the thread ID from the latest simplified test
+    # Use the thread ID from the latest dynamic interrupt test
     api_url = "http://127.0.0.1:2024"
-    thread_id = "0a8e72c8-45b7-46c9-8134-f7101fe76982"  # From the simplified test
-    run_id = "1f072f4c-6b6b-66f4-970e-6b80c66567d5"     # From the simplified test
+    thread_id = "91342d37-8fd4-4866-a608-65799b4b2046"  # From the latest dynamic interrupt test
+    run_id = "1f072fac-e654-6b6c-854e-143e323d7e1b"     # From the latest dynamic interrupt test
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:

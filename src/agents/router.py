@@ -14,37 +14,41 @@ logger = structlog.get_logger().bind(agent="router")
 
 
 @traceable(name="router_node", tags=["control"])
-async def router_node(state: AgentState) -> str:
+async def router_node(state: AgentState) -> AgentState:
     """
     Route workflow based on human decision from the Agent Inbox.
 
     Expected values in state:
-    - state.decision: "accept" | "edit" | "ignore"
+    - state.response_metadata["decision"]: "accept" | "instruction" | "ignore"
     - state.human_feedback (optional): Any text/structured feedback from human
 
     Returns:
-        The name of the next node to run.
+    - state with updated response_metadata
     """
-    decision = getattr(state, "decision", "ignore")
-    feedback = getattr(state, "human_feedback", None)
+    decision = state.response_metadata.get("decision", "ignore")
+    feedback = state.human_feedback
 
     logger.info("Routing human decision", decision=decision, feedback=feedback)
 
     if decision == "accept":
         # Human approved the draft → send it
-        logger.info("✅ Draft accepted, routing to send_email")
-        return "send_email"
+        logger.info("✅ Draft accepted, will route to send_email")
+        state.response_metadata["router_decision"] = "send_email"
 
-    elif decision == "edit":
-        # Human requested edits/feedback → back to Supervisor
+    elif decision == "instruction":
+        # Human provided instructions/feedback → back to Supervisor
         if feedback:
-            state.response_metadata["human_feedback"] = feedback
+            if "human_feedback" not in state.response_metadata:
+                state.response_metadata["human_feedback"] = []
+            state.response_metadata["human_feedback"].append(feedback)
             logger.info("📥 Stored human feedback in state.response_metadata")
 
-        logger.info("✏️ Draft needs modification, routing back to supervisor")
-        return "supervisor"
+        logger.info("✏️ Human provided instructions, will route back to supervisor")
+        state.response_metadata["router_decision"] = "supervisor"
 
     else:
-        # Ignore = stop workflow
-        logger.info("🚫 Draft ignored, ending workflow")
-        return "__end__"  # END node
+        # Default case: ignore → end workflow
+        logger.info("🛑 Draft ignored, will end workflow")
+        state.response_metadata["router_decision"] = "END"
+        
+    return state
