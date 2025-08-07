@@ -23,5 +23,13 @@ python cli.py gmail --count 5           # Fetch 5 latest emails
 python cli.py gmail --no-process        # Fetch without triggering workflow
 python cli.py gmail --no-body           # Fetch without showing body
 
+# Automated Gmail polling with cronjob (runs every 5 minutes automatically)
+python gmail_auto_poller.py               # Test the auto poller manually
+crontab -e                                # Edit cronjob (add the line below)
+crontab -l                                # List active cronjobs
+# Cronjob line to add: */5 * * * * /Users/samuelaudette/Documents/code_projects/agent_inbox_1.12/run_gmail_poller.sh >/dev/null 2>&1
+tail -f gmail_poller.log                  # Monitor auto poller activity
+cat processed_emails.json                 # See which emails were processed
+
 # venv
 source .venv/bin/activate

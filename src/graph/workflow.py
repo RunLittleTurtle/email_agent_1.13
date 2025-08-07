@@ -65,18 +65,42 @@ async def human_review_node(state: AgentState) -> AgentState:
     
     # Build email context for the interrupt - formatted for readability
     if state.email:
-        # Create a clean, formatted email context string
-        email_context_str = f"From: {state.email.sender}\nSubject: {state.email.subject}\n\n{state.email.body[:200]}{'...' if len(state.email.body) > 200 else ''}"
+        # Format the received date nicely
+        try:
+            if hasattr(state.email, 'timestamp') and state.email.timestamp:
+                from datetime import datetime
+                if isinstance(state.email.timestamp, str):
+                    date_received = datetime.fromisoformat(state.email.timestamp.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    date_received = state.email.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                date_received = "Date not available"
+        except Exception:
+            date_received = "Date parsing error"
+        
+        # Create a clean, formatted email context string with FULL body and date
+        email_context_str = f"From: {state.email.sender}\nSubject: {state.email.subject}\nReceived: {date_received}\n\n{state.email.body}"
     else:
         email_context_str = "No email context available"
+    
+    # Create descriptive action name with sender and subject for better UI display
+    if state.email:
+        # Truncate subject if too long for UI display
+        subject_short = state.email.subject[:50] + "..." if len(state.email.subject) > 50 else state.email.subject
+        sender_name = state.email.sender.split('<')[0].strip() if '<' in state.email.sender else state.email.sender
+        action_name = f"📧 {sender_name}: {subject_short}"
+        description_text = f"Review draft response for email from {sender_name} - {subject_short}"
+    else:
+        action_name = "📧 Email review (Unknown sender)"
+        description_text = "Review draft response for email from Unknown sender"
     
     # Dynamic interrupt using Agent Inbox expected structure
     human_response = interrupt({
         "action_request": {
-            "action": "review_email_draft",
+            "action": action_name,  # Now shows sender and subject instead of generic "review_email_draft"
             "args": {
                 "draft_response": state.draft_response,
-                "email_context": email_context_str,  # Use formatted string instead of dict
+                "email_context": email_context_str,  # Now contains full email body and received date
                 "message": "Please review the draft response and choose an action"
             }
         },
@@ -86,7 +110,7 @@ async def human_review_node(state: AgentState) -> AgentState:
             "allow_respond": True,  # This allows providing instructions
             "allow_edit": True      # This allows editing the draft directly
         },
-        "description": f"Review draft response for email from {state.email.sender if state.email else 'Unknown'}"
+        "description": description_text  # More descriptive description
     })
     
     # Process human response when workflow is resumed
