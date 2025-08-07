@@ -16,6 +16,10 @@ from src.models.state import AgentState
 from src.agents.email_processor import EmailProcessorAgent
 from src.agents.supervisor import SupervisorAgent
 from src.agents.adaptive_writer import AdaptiveWriterAgent
+from src.agents.calendar_agent import CalendarAgent
+from src.agents.rag_agent import RAGAgent
+from src.agents.crm_agent import CRMAgent
+from src.agents.email_sender import EmailSenderAgent
 from src.agents.router import router_node
 
 import structlog
@@ -27,6 +31,10 @@ logger = structlog.get_logger()
 email_processor_agent = None
 supervisor_agent = None
 adaptive_writer_agent = None
+calendar_agent = None
+rag_agent = None
+crm_agent = None
+email_sender_agent = None
 
 
 @traceable
@@ -38,27 +46,9 @@ async def email_processor_node(state: AgentState) -> AgentState:
 
 @traceable
 async def supervisor_node(state: AgentState) -> AgentState:
-    """Route email based on intent classification (simplified for MVP)"""
-    logger.info("🧭 Supervisor Node (MVP - Direct to Writer)")
-
-    # For MVP: Always route to adaptive_writer since other agents aren't implemented
-    # Process with supervisor to get intent classification
-    updated_state = await supervisor_agent.ainvoke(state)
-
-    # Override routing to always go to adaptive_writer for MVP
-    if "routing" not in updated_state.response_metadata:
-        updated_state.response_metadata["routing"] = {
-            "required_agents": ["adaptive_writer"],
-            "completed_agents": [],
-            "next": "adaptive_writer",
-            "mvp_mode": True
-        }
-    else:
-        # Force routing to adaptive_writer for MVP
-        updated_state.response_metadata["routing"]["next"] = "adaptive_writer"
-        updated_state.response_metadata["routing"]["mvp_mode"] = True
-
-    return updated_state
+    """Route email based on intent classification with multi-agent support"""
+    logger.info("🧭 Supervisor Node")
+    return await supervisor_agent.ainvoke(state)
 
 
 @traceable
@@ -145,17 +135,22 @@ async def human_review_node(state: AgentState) -> AgentState:
 
 def create_workflow() -> StateGraph:
     """
-    Create MVP workflow with only implemented agents + human interrupt + router
-    Flow: email_processor -> supervisor -> adaptive_writer -> human_review -> router -> (send_email/supervisor/END)
+    Create full workflow with all agents + human interrupt + router
+    Flow: email_processor -> supervisor -> (calendar/rag/crm) -> adaptive_writer -> human_review -> router
     """
     global email_processor_agent, supervisor_agent, adaptive_writer_agent
+    global calendar_agent, rag_agent, crm_agent, email_sender_agent
 
-    logger.info("🚀 Creating Agent Inbox MVP Workflow with Action-Based Human Review...")
+    logger.info("🚀 Creating Agent Inbox Phase 2 Workflow with Multi-Agent Support...")
 
-    # Initialize agents here (after environment variables are loaded)
+    # Initialize all agents
     email_processor_agent = EmailProcessorAgent()
     supervisor_agent = SupervisorAgent()
     adaptive_writer_agent = AdaptiveWriterAgent()
+    email_sender_agent = EmailSenderAgent()
+    calendar_agent = CalendarAgent()
+    rag_agent = RAGAgent()
+    crm_agent = CRMAgent()
 
     # Create workflow with AgentState
     workflow = StateGraph(AgentState)
@@ -167,18 +162,71 @@ def create_workflow() -> StateGraph:
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("router", router_node)
     
-    # Add placeholder send_email node for now
-    async def send_email_node(state: AgentState) -> AgentState:
-        logger.info("📮 Send Email Node (Placeholder)")
-        state.add_message("system", f"Email would be sent: {state.draft_response[:100]}...")
-        return state
+    # Add specialized agent nodes with traceable wrappers
+    @traceable
+    async def calendar_node(state: AgentState) -> AgentState:
+        logger.info("📅 Calendar Agent Node")
+        return await calendar_agent.ainvoke(state)
     
+    @traceable
+    async def rag_node(state: AgentState) -> AgentState:
+        logger.info("📄 RAG Agent Node")
+        return await rag_agent.ainvoke(state)
+    
+    @traceable
+    async def crm_node(state: AgentState) -> AgentState:
+        logger.info("👥 CRM Agent Node")
+        return await crm_agent.ainvoke(state)
+    
+    workflow.add_node("calendar_agent", calendar_node)
+    workflow.add_node("rag_agent", rag_node)
+    workflow.add_node("crm_agent", crm_node)
+    
+    # Add dedicated EmailSenderAgent node for robust email sending
+    @traceable
+    async def send_email_node(state: AgentState) -> AgentState:
+        """Send the approved email response using dedicated EmailSenderAgent"""
+        logger.info("📮 Send Email Node (Using EmailSenderAgent)")
+        return await email_sender_agent.ainvoke(state)
+        
     workflow.add_node("send_email", send_email_node)
 
     # Define the flow
     workflow.set_entry_point("email_processor")
     workflow.add_edge("email_processor", "supervisor")
-    workflow.add_edge("supervisor", "adaptive_writer")
+    
+    # Add conditional routing from supervisor to specialized agents or adaptive_writer
+    def route_from_supervisor(state: AgentState) -> str:
+        """Determine next node based on supervisor's routing decision"""
+        routing = state.response_metadata.get("routing", {})
+        next_agent = routing.get("next", "adaptive_writer")
+        
+        # Track which agent we're routing to for completion detection
+        if next_agent in ["calendar_agent", "rag_agent", "crm_agent"]:
+            routing["last_routed_to"] = next_agent
+            state.response_metadata["routing"] = routing
+        
+        logger.info(f"Routing from supervisor to: {next_agent}")
+        return next_agent
+    
+    workflow.add_conditional_edges(
+        "supervisor",
+        route_from_supervisor,
+        {
+            "calendar_agent": "calendar_agent",
+            "rag_agent": "rag_agent",
+            "crm_agent": "crm_agent",
+            "adaptive_writer": "adaptive_writer",
+            "END": END  # In case of critical failure
+        }
+    )
+    
+    # Route specialized agents back to supervisor for progress check
+    workflow.add_edge("calendar_agent", "supervisor")
+    workflow.add_edge("rag_agent", "supervisor")
+    workflow.add_edge("crm_agent", "supervisor")
+    
+    # Continue with adaptive_writer flow
     workflow.add_edge("adaptive_writer", "human_review")
     workflow.add_edge("human_review", "router")
     
@@ -202,6 +250,6 @@ def create_workflow() -> StateGraph:
 
     app = workflow.compile()
 
-    logger.info("✅ MVP Workflow compiled successfully with action-based human review")
+    logger.info("✅ Phase 2 Workflow compiled successfully with multi-agent support")
 
     return app

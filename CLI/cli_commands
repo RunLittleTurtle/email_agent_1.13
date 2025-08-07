@@ -16,3 +16,12 @@ python cli.py email
 # Get help for any command
 python cli.py --help
 python cli.py email --help
+
+# Fetch latest Gmail emails and trigger workflow
+python cli.py gmail                     # Fetch 1 latest email and send to workflow
+python cli.py gmail --count 5           # Fetch 5 latest emails
+python cli.py gmail --no-process        # Fetch without triggering workflow
+python cli.py gmail --no-body           # Fetch without showing body
+
+# venv
+source .venv/bin/activate

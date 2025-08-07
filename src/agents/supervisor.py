@@ -6,6 +6,7 @@ Now directly handles multiple intents (no task_decomposer).
 
 import json
 from typing import List, Dict, Any
+from datetime import datetime
 
 from langsmith import traceable
 from src.agents.base_agent import BaseAgent
@@ -103,12 +104,19 @@ Return JSON:
                 # Determine which agents are required
                 required_agents = self._determine_agents(classification, primary_intent)
 
-                # Store routing plan in state
+                # Store routing plan in state with timeout configuration
                 state.response_metadata["routing"] = {
                     "classification": classification,
                     "required_agents": required_agents,
                     "completed_agents": [],
-                    "confidence": classification.get("confidence", 0.0),
+                    "failed_agents": [],
+                    "agent_timeouts": {
+                        "calendar_agent": 30,  # 30 seconds
+                        "rag_agent": 45,      # 45 seconds for document search
+                        "crm_agent": 30       # 30 seconds
+                    },
+                    "started_at": datetime.now().isoformat(),
+                    "next": required_agents[0] if required_agents else "adaptive_writer"
                 }
 
                 self._add_message(
@@ -217,28 +225,118 @@ Return JSON:
     def _check_progress(self, state: AgentState) -> AgentState:
         """
         Check which required agents are done.
-        If all completed, forward to adaptive_writer.
+        Handle timeouts and errors.
+        If all completed or critical failure, forward to adaptive_writer.
         """
 
         routing = state.response_metadata["routing"]
         required = routing.get("required_agents", [])
         completed = routing.get("completed_agents", [])
+        failed = routing.get("failed_agents", [])
+        timeouts = routing.get("agent_timeouts", {})
+        started_at = datetime.fromisoformat(routing.get("started_at", datetime.now().isoformat()))
 
-        # Add any agent results that just finished
-        last_agent = state.last_agent if hasattr(state, "last_agent") else None
-        if last_agent and last_agent not in completed:
-            completed.append(last_agent)
-            routing["completed_agents"] = completed
-            self.logger.info(f"Marking {last_agent} as completed")
+        # Check which agent just finished execution
+        # When we return to supervisor, we need to check which agent data was updated
+        last_executed_agent = None
+        
+        # Determine which agent just executed based on new data or routing context
+        if routing.get("last_routed_to"):
+            last_executed_agent = routing["last_routed_to"]
+        
+        # Debug logging
+        self.logger.info(f"🔍 DEBUG - current_agent: {state.current_agent}")
+        self.logger.info(f"🔍 DEBUG - last_executed_agent: {last_executed_agent}")
+        self.logger.info(f"🔍 DEBUG - required: {required}")
+        self.logger.info(f"🔍 DEBUG - completed: {completed}")
+        self.logger.info(f"🔍 DEBUG - state.status: {state.status}")
+        self.logger.info(f"🔍 DEBUG - has calendar_data: {bool(state.calendar_data)}")
+        self.logger.info(f"🔍 DEBUG - errors: {state.error_messages}")
+        
+        # Check if the last executed agent completed successfully
+        if last_executed_agent and last_executed_agent in required and last_executed_agent not in completed:
+            # Check if agent has returned from execution with data/results
+            agent_has_data = (
+                (last_executed_agent == "calendar_agent" and state.calendar_data) or
+                (last_executed_agent == "rag_agent" and state.document_data) or
+                (last_executed_agent == "crm_agent" and state.contact_data) or
+                last_executed_agent in ["calendar_agent", "rag_agent", "crm_agent"]  # Allow completion even without data
+            )
+            
+            self.logger.info(f"🔍 DEBUG - agent_has_data: {agent_has_data}")
+            
+            # If agent executed without errors, mark as completed
+            if state.status != "error" and not any(last_executed_agent in str(err) for err in state.error_messages) and agent_has_data:
+                completed.append(last_executed_agent)
+                routing["completed_agents"] = completed
+                self.logger.info(f"✅ Marking {last_executed_agent} as completed")
+                
+                # Add agent results to state metadata
+                if last_executed_agent == "calendar_agent" and state.calendar_data:
+                    routing["calendar_results"] = state.calendar_data.dict()
+                elif last_executed_agent == "rag_agent" and state.document_data:
+                    routing["document_results"] = state.document_data.dict()
+                elif last_executed_agent == "crm_agent" and state.contact_data:
+                    routing["contact_results"] = state.contact_data.dict()
+            else:
+                self.logger.info(f"🔍 DEBUG - Agent {last_executed_agent} not marked complete. Reasons:")
+                self.logger.info(f"  - status != error: {state.status != 'error'}")
+                self.logger.info(f"  - no errors: {not any(last_executed_agent in str(err) for err in state.error_messages)}")
+                self.logger.info(f"  - has_data: {agent_has_data}")
+                
+                # Agent failed
+                if last_executed_agent not in failed:
+                    failed.append(last_executed_agent)
+                    routing["failed_agents"] = failed
+                    self.logger.error(f"❌ Agent {last_executed_agent} failed")
 
-        # Check if all done
-        if set(completed) >= set(required):
-            self.logger.info("✅ All required agents completed, forwarding to adaptive_writer")
-            routing["next"] = "adaptive_writer"
+        # Check for timeouts
+        elapsed_seconds = (datetime.now() - started_at).total_seconds()
+        for agent in required:
+            if agent not in completed and agent not in failed:
+                agent_timeout = timeouts.get(agent, 60)  # Default 60 seconds
+                if elapsed_seconds > agent_timeout:
+                    failed.append(agent)
+                    routing["failed_agents"] = failed
+                    self.logger.warning(f"⏱️ Agent {agent} timed out after {agent_timeout}s")
+                    state.add_error(f"Agent {agent} timed out")
+
+        # Determine next step
+        all_done = set(completed + failed) >= set(required)
+        if all_done:
+            # All agents have either completed or failed
+            success_rate = len(completed) / len(required) if required else 0
+            
+            if success_rate >= 0.5:  # At least 50% success
+                self.logger.info(
+                    f"✅ Workflow proceeding to adaptive_writer "
+                    f"({len(completed)}/{len(required)} agents succeeded)"
+                )
+                routing["next"] = "adaptive_writer"
+                
+                # Add summary of what succeeded/failed
+                routing["completion_summary"] = {
+                    "total_required": len(required),
+                    "completed": completed,
+                    "failed": failed,
+                    "success_rate": success_rate
+                }
+            else:
+                # Too many failures
+                self.logger.error("❌ Too many agent failures, workflow cannot continue")
+                state.status = "error"
+                state.add_error(f"Workflow failed: only {len(completed)}/{len(required)} agents succeeded")
+                routing["next"] = "END"
         else:
-            remaining = set(required) - set(completed)
-            self.logger.info(f"⏳ Still waiting on agents: {remaining}")
-            routing["next"] = list(remaining)[0]
+            # Still have agents to run
+            remaining = set(required) - set(completed) - set(failed)
+            if remaining:
+                next_agent = list(remaining)[0]
+                self.logger.info(f"⏳ Next agent: {next_agent} (remaining: {remaining})")
+                routing["next"] = next_agent
+            else:
+                # No agents left to run but not all done? Shouldn't happen
+                routing["next"] = "adaptive_writer"
 
         state.response_metadata["routing"] = routing
         return state

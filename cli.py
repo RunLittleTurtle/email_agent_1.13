@@ -12,12 +12,14 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.syntax import Syntax
 import httpx
 
 app = typer.Typer(
@@ -306,6 +308,237 @@ async def _run_email_workflow(sender: str, subject: str, body: str, wait: bool):
             
         except Exception as e:
             console.print(f"[red]❌ Error running workflow: {e}[/red]")
+
+
+@app.command()
+def gmail(
+    count: int = typer.Option(1, "--count", "-c", help="Number of emails to fetch"),
+    process: bool = typer.Option(True, "--process/--no-process", help="Send email to workflow for processing"),
+    show_body: bool = typer.Option(True, "--show-body/--no-body", help="Display email body content")
+):
+    """
+    📧 Fetch latest Gmail email(s) and trigger workflow
+    
+    Retrieves the most recent email(s) from your Gmail inbox and automatically sends them to the
+    LangGraph workflow for processing. The processed email will appear in Agent Inbox for review.
+    """
+    console.print(Panel.fit(
+        "📧 [bold blue]Gmail Email Fetcher[/bold blue]",
+        subtitle="Retrieve latest emails from Gmail"
+    ))
+    
+    ensure_venv()
+    
+    try:
+        # Import Gmail utilities
+        from src.utils.google_auth import GoogleAuthHelper
+        from googleapiclient.discovery import build
+        
+        console.print("🔐 Authenticating with Gmail...")
+        
+        # Gmail API scopes
+        scopes = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.send'
+        ]
+        
+        # Try different token files
+        token_files = ['fresh_token.pickle', 'token.pickle']
+        gmail_service = None
+        
+        for token_file in token_files:
+            if os.path.exists(token_file):
+                creds = GoogleAuthHelper.get_credentials(scopes, token_file)
+                if creds:
+                    gmail_service = build('gmail', 'v1', credentials=creds)
+                    console.print(f"✅ Authenticated using {token_file}")
+                    break
+        
+        if not gmail_service:
+            console.print("[red]❌ Could not authenticate with Gmail[/red]")
+            console.print("💡 Make sure you have run OAuth setup: [bold]python simple_oauth_setup.py[/bold]")
+            raise typer.Exit(1)
+        
+        console.print(f"📬 Fetching {count} latest email(s)...")
+        
+        # Fetch emails
+        results = gmail_service.users().messages().list(
+            userId='me',
+            maxResults=count,
+            q='in:inbox'
+        ).execute()
+        
+        messages = results.get('messages', [])
+        
+        if not messages:
+            console.print("[yellow]📭 No emails found in inbox[/yellow]")
+            return
+        
+        console.print(f"📨 Found {len(messages)} email(s)\n")
+        
+        fetched_emails = []
+        
+        for i, message in enumerate(messages, 1):
+            # Get full message details
+            msg = gmail_service.users().messages().get(
+                userId='me', 
+                id=message['id'],
+                format='full'
+            ).execute()
+            
+            # Extract email headers
+            headers = {h['name']: h['value'] for h in msg['payload']['headers']}
+            
+            sender = headers.get('From', 'Unknown')
+            subject = headers.get('Subject', 'No Subject')
+            date_str = headers.get('Date', '')
+            
+            # Extract recipients (To, Cc, Bcc)
+            recipients = []
+            to_header = headers.get('To', '')
+            cc_header = headers.get('Cc', '')
+            bcc_header = headers.get('Bcc', '')
+            
+            # Parse To field
+            if to_header:
+                recipients.extend([addr.strip() for addr in to_header.split(',')])
+            # Parse Cc field  
+            if cc_header:
+                recipients.extend([addr.strip() for addr in cc_header.split(',')])
+            # Parse Bcc field
+            if bcc_header:
+                recipients.extend([addr.strip() for addr in bcc_header.split(',')])
+            
+            # If no recipients found, use a default (this email was sent to your inbox)
+            if not recipients:
+                recipients = ['info@800m.ca']  # Default to your email address
+            
+            # Extract body
+            body = ""
+            if 'parts' in msg['payload']:
+                for part in msg['payload']['parts']:
+                    if part['mimeType'] == 'text/plain' and 'data' in part['body']:
+                        import base64
+                        body_data = part['body']['data']
+                        body = base64.urlsafe_b64decode(body_data).decode('utf-8')
+                        break
+            elif msg['payload']['mimeType'] == 'text/plain' and 'data' in msg['payload']['body']:
+                import base64
+                body_data = msg['payload']['body']['data']
+                body = base64.urlsafe_b64decode(body_data).decode('utf-8')
+            
+            # Create email object (matching EmailMessage model)
+            email_data = {
+                'id': message['id'],
+                'sender': sender,
+                'subject': subject,
+                'body': body,
+                'recipients': recipients,  # Required field
+                'timestamp': datetime.now().isoformat(),
+                'attachments': []  # Empty list for now
+            }
+            
+            fetched_emails.append(email_data)
+            
+            # Display email info
+            console.print(Panel(
+                f"[bold]Email #{i}[/bold]\n"
+                f"📤 From: [cyan]{sender}[/cyan]\n"
+                f"📋 Subject: [yellow]{subject}[/yellow]\n"
+                f"📅 Date: {date_str}\n"
+                f"🆔 ID: [dim]{message['id']}[/dim]",
+                title=f"📧 Email {i}/{len(messages)}",
+                border_style="blue"
+            ))
+            
+            if show_body and body:
+                # Show body preview (first 300 chars)
+                body_preview = body[:300] + "..." if len(body) > 300 else body
+                console.print(Panel(
+                    Syntax(body_preview, "text", theme="monokai", line_numbers=False),
+                    title="📝 Body Preview",
+                    border_style="green"
+                ))
+            
+            console.print()  # Empty line between emails
+        
+        # Optional: Send to workflow
+        if process and fetched_emails:
+            console.print("🔄 Sending latest email to workflow for processing...")
+            
+            latest_email = fetched_emails[0]  # Get the first (latest) email
+            
+            # Send to LangGraph API
+            asyncio.run(_send_email_to_workflow(latest_email))
+        
+        # Update CLI commands file
+        _update_cli_commands_with_gmail()
+        
+    except ImportError as e:
+        console.print(f"[red]❌ Missing dependencies: {e}[/red]")
+        console.print("💡 Install Google API dependencies: [bold]pip install -r requirements.txt[/bold]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]❌ Error fetching Gmail: {e}[/red]")
+        raise typer.Exit(1)
+
+
+async def _send_email_to_workflow(email_data):
+    """Send email to LangGraph workflow for processing"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Create thread
+        thread_response = await client.post(
+            f"{LANGGRAPH_API}/threads",
+            json={"metadata": {"source": "gmail_cli"}}
+        )
+        
+        if thread_response.status_code != 200:
+            console.print(f"[red]❌ Failed to create thread: {thread_response.text}[/red]")
+            return
+        
+        thread_data = thread_response.json()
+        thread_id = thread_data["thread_id"]
+        
+        # Start workflow
+        run_response = await client.post(
+            f"{LANGGRAPH_API}/threads/{thread_id}/runs",
+            json={
+                "assistant_id": "email_agent",
+                "input": {"email": email_data},
+                "stream_mode": "values"
+            }
+        )
+        
+        if run_response.status_code != 200:
+            console.print(f"[red]❌ Failed to start workflow: {run_response.text}[/red]")
+            return
+        
+        run_data = run_response.json()
+        console.print(f"✅ Email sent to workflow!")
+        console.print(f"   Thread ID: [bold]{thread_id}[/bold]")
+        console.print(f"   Run ID: [bold]{run_data['run_id']}[/bold]")
+        console.print(f"🎯 Check Agent Inbox at: [link]{AGENT_INBOX_UI}[/link]")
+
+
+def _update_cli_commands_with_gmail():
+    """Update CLI commands file with Gmail command examples"""
+    cli_commands_path = PROJECT_ROOT / "CLI" / "cli_commands"
+    
+    gmail_commands = "\n# Fetch latest Gmail emails\n"
+    gmail_commands += "python cli.py gmail                     # Fetch 1 latest email\n"
+    gmail_commands += "python cli.py gmail --count 5           # Fetch 5 latest emails\n"
+    gmail_commands += "python cli.py gmail --process           # Fetch and send to workflow\n"
+    gmail_commands += "python cli.py gmail --no-body           # Fetch without showing body\n"
+    
+    try:
+        with open(cli_commands_path, 'r') as f:
+            current_content = f.read()
+        
+        if "# Fetch latest Gmail emails" not in current_content:
+            with open(cli_commands_path, 'a') as f:
+                f.write(gmail_commands)
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not update CLI commands file: {e}[/yellow]")
 
 
 @app.command()

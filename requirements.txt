@@ -14,5 +14,14 @@ langsmith
 typer[all]
 rich
 
+# HTTP client for LangGraph API
+httpx
+
 # Logging
 structlog
+
+# Google Workspace API dependencies
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client

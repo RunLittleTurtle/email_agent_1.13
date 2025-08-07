@@ -36,6 +36,11 @@ agent-inbox/node_modules/
 .env.local
 .env.production
 
+# Google Cloud credentials
+credentials.json
+credentials/client_secret_443821363207-e017ea00dg7kt4g6tn3uqa54ctp18uf2.apps.googleusercontent.com.json
+*.pickle
+
 # IDE
 .vscode/
 .idea/
@@ -63,3 +68,6 @@ htmlcov/
 # Temporary files
 *.tmp
 *.temp
+
+# Credentials
+credentials/client_secret_443821363207-e017ea00dg7kt4g6tn3uqa54ctp18uf2.apps.googleusercontent.com.json

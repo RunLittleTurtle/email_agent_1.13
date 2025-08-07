@@ -6,6 +6,7 @@ Generates email responses based on context and intent
 import json
 from typing import Dict, Any, Optional
 
+from langsmith import traceable
 from src.agents.base_agent import BaseAgent
 from src.models.state import AgentState, EmailIntent
 
@@ -23,6 +24,7 @@ class AdaptiveWriterAgent(BaseAgent):
             temperature=0.7  # Higher temperature for more creative writing
         )
     
+    @traceable(name="adaptive_writer_process", tags=["agent", "writer"])
     async def process(self, state: AgentState) -> AgentState:
         """
         Generate email response based on all gathered context
@@ -62,13 +64,47 @@ class AdaptiveWriterAgent(BaseAgent):
                 context_parts.append(f"Urgency: {state.extracted_context.urgency_level}")
                 context_parts.append(f"Actions Requested: {', '.join(state.extracted_context.requested_actions)}")
             
-            # Add specialized agent results
-            if state.calendar_data:
-                context_parts.append("Calendar data available for meeting scheduling")
-            if state.document_data:
-                context_parts.append("Document search results available")
-            if state.contact_data:
-                context_parts.append("Contact information available")
+            # Add detailed specialized agent results
+            routing_info = state.response_metadata.get("routing", {})
+            completion_summary = routing_info.get("completion_summary", {})
+            
+            # Add calendar agent results
+            if state.calendar_data and state.calendar_data.meeting_request:
+                context_parts.append("\n📅 Calendar Information:")
+                meeting = state.calendar_data.meeting_request
+                context_parts.append(f"  - Meeting: {meeting.get('title', 'Untitled')}")
+                if state.calendar_data.availability:
+                    avail = state.calendar_data.availability
+                    context_parts.append(f"  - Available slots: {len(avail.get('available', []))}")
+                    context_parts.append(f"  - Conflicts: {len(avail.get('conflicts', []))}")
+                if state.calendar_data.suggested_times:
+                    context_parts.append(f"  - Alternative times suggested: {len(state.calendar_data.suggested_times)}")
+            
+            # Add document search results
+            if state.document_data and state.document_data.found_documents:
+                context_parts.append("\n📄 Document Search Results:")
+                for doc in state.document_data.found_documents[:3]:  # Top 3
+                    context_parts.append(f"  - {doc['name']} ({doc['type']})")
+                    if doc.get('content_summary'):
+                        context_parts.append(f"    Summary: {doc['content_summary'][:100]}...")
+                if state.document_data.missing_documents:
+                    context_parts.append(f"  - Not found: {', '.join(state.document_data.missing_documents)}")
+            
+            # Add contact/CRM results
+            if state.contact_data and state.contact_data.contacts:
+                context_parts.append("\n👥 Contact Information:")
+                for contact in state.contact_data.contacts[:3]:  # Top 3
+                    context_parts.append(f"  - {contact['name']}: {contact.get('summary', 'No details')}")
+                if state.contact_data.relationship_context:
+                    ctx = state.contact_data.relationship_context
+                    if ctx.get('delegation_ready'):
+                        context_parts.append(f"  - Task delegation ready for {len(ctx.get('assignees', []))} people")
+            
+            # Add completion summary if some agents failed
+            if completion_summary:
+                failed = completion_summary.get("failed", [])
+                if failed:
+                    context_parts.append(f"\n⚠️ Note: Some information may be incomplete ({', '.join(failed)} failed)")
             
             # System prompt for response generation
             system_prompt = """You are a professional email response writer.
@@ -111,10 +147,12 @@ Intent Classification: {state.intent.value if state.intent else 'unknown'}{feedb
 
 Generate a professional email response that:
 1. Acknowledges the sender's message
-2. Addresses all requested actions or questions
+2. Addresses all requested actions or questions using the context information above
 3. Maintains appropriate tone and formality
 4. Is clear and concise
 5. Includes a proper greeting and closing{' and addresses all human feedback' if is_refinement else ''}
+6. Incorporates relevant information from calendar, documents, and contacts as needed
+7. If some information is missing due to agent failures, acknowledge this appropriately
 
 Return the response in JSON format:
 {{
