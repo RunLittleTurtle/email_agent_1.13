@@ -32,8 +32,19 @@ class SupervisorAgent(BaseAgent):
         """
         Classify email intent and determine routing.
         If multiple intents, decompose directly and queue multiple agents.
+        Handles human feedback for refinement loops.
         """
 
+        # Check if this is a feedback refinement loop
+        has_feedback = (
+            state.human_feedback or 
+            state.response_metadata.get("human_feedback") or
+            state.response_metadata.get("decision") == "instruction"
+        )
+        
+        if has_feedback:
+            return self._handle_feedback_refinement(state)
+        
         # If already has a routing plan, just check completion
         if "routing" in state.response_metadata:
             return self._check_progress(state)
@@ -153,6 +164,55 @@ Return JSON:
             return agents or ["adaptive_writer"]
 
         return routing_map.get(EmailIntent(primary_intent), ["adaptive_writer"])
+
+    def _handle_feedback_refinement(self, state: AgentState) -> AgentState:
+        """
+        Handle human feedback refinement - route back to adaptive_writer with feedback context.
+        """
+        self.logger.info("🔄 Processing human feedback for refinement")
+        
+        # Collect all feedback sources
+        feedback_list = []
+        
+        # Current feedback
+        if state.human_feedback:
+            feedback_list.append(state.human_feedback)
+            
+        # Historical feedback from response_metadata
+        if "human_feedback" in state.response_metadata:
+            historical = state.response_metadata["human_feedback"]
+            if isinstance(historical, list):
+                feedback_list.extend(historical)
+            else:
+                feedback_list.append(historical)
+        
+        # Store comprehensive feedback context
+        state.response_metadata["feedback_context"] = {
+            "feedback_count": len(feedback_list),
+            "all_feedback": feedback_list,
+            "refinement_iteration": state.response_metadata.get("refinement_iteration", 0) + 1,
+            "previous_draft": state.draft_response
+        }
+        
+        # Set routing to go directly to adaptive_writer for refinement
+        state.response_metadata["routing"] = {
+            "required_agents": ["adaptive_writer"],
+            "completed_agents": [],
+            "next": "adaptive_writer",
+            "is_refinement": True
+        }
+        
+        self._add_message(
+            state,
+            f"Processing feedback refinement (iteration {state.response_metadata['feedback_context']['refinement_iteration']}). "
+            f"Routing to adaptive_writer with {len(feedback_list)} feedback items.",
+            metadata={
+                "feedback_items": len(feedback_list),
+                "is_refinement": True
+            }
+        )
+        
+        return state
 
     def _check_progress(self, state: AgentState) -> AgentState:
         """

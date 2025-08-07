@@ -10,5 +10,9 @@ langgraph
 langgraph-cli
 langsmith
 
+# CLI
+typer[all]
+rich
+
 # Logging
 structlog

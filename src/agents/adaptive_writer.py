@@ -40,6 +40,13 @@ class AdaptiveWriterAgent(BaseAgent):
             
             self.logger.info("Generating email response")
             
+            # Check if this is a feedback refinement iteration
+            is_refinement = state.response_metadata.get("routing", {}).get("is_refinement", False)
+            feedback_context = state.response_metadata.get("feedback_context", {})
+            
+            if is_refinement:
+                self.logger.info(f"🔄 Processing feedback refinement iteration {feedback_context.get('refinement_iteration', 1)}")
+            
             # Gather all context for response generation
             context_parts = []
             
@@ -70,6 +77,25 @@ class AdaptiveWriterAgent(BaseAgent):
             Be concise but complete.
             Always maintain a professional and helpful tone."""
             
+            # Build feedback context for refinement iterations
+            feedback_prompt_section = ""
+            if is_refinement and feedback_context:
+                all_feedback = feedback_context.get("all_feedback", [])
+                previous_draft = feedback_context.get("previous_draft", "")
+                iteration = feedback_context.get("refinement_iteration", 1)
+                
+                feedback_prompt_section = f"""
+
+FEEDBACK REFINEMENT - Iteration {iteration}:
+Previous Draft:
+{previous_draft}
+
+Human Feedback to Address:
+{chr(10).join(f"- {fb}" for fb in all_feedback)}
+
+IMPORTANT: This is a refinement iteration. Please improve the previous draft based on the human feedback above.
+Address all feedback points while maintaining the email's core purpose and professionalism."""
+            
             # Create response generation prompt
             prompt = f"""Generate a response to this email:
 
@@ -81,14 +107,14 @@ Body: {state.email.body}
 Context Information:
 {chr(10).join(context_parts)}
 
-Intent Classification: {state.intent.value if state.intent else 'unknown'}
+Intent Classification: {state.intent.value if state.intent else 'unknown'}{feedback_prompt_section}
 
 Generate a professional email response that:
 1. Acknowledges the sender's message
 2. Addresses all requested actions or questions
 3. Maintains appropriate tone and formality
 4. Is clear and concise
-5. Includes a proper greeting and closing
+5. Includes a proper greeting and closing{' and addresses all human feedback' if is_refinement else ''}
 
 Return the response in JSON format:
 {{

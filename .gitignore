@@ -27,6 +27,10 @@ venv/
 env/
 ENV/
 
+# Node.js
+node_modules/
+agent-inbox/node_modules/
+
 # Environment Variables
 .env
 .env.local
