@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Node.js
+node_modules/
+agent-inbox/node_modules/
+
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Google Cloud credentials
+credentials.json
+credentials/client_secret_443821363207-e017ea00dg7kt4g6tn3uqa54ctp18uf2.apps.googleusercontent.com.json
+*.pickle
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# LangGraph
+.langgraph_api/
+.ropeproject/
+.langgraph_sdk/
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Credentials
+credentials/client_secret_443821363207-e017ea00dg7kt4g6tn3uqa54ctp18uf2.apps.googleusercontent.com.json

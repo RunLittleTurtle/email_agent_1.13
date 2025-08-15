@@ -1,0 +1,74 @@
+# Check current branch
+git branch
+
+# Check status of files
+git status
+
+# Stage all changes
+git add .
+
+# Commit staged changes
+git commit -m "Your commit message"
+
+# Push to current branch on remote (usually origin)
+git push
+
+# Pull latest changes from remote for current branch
+git pull
+
+# List all branches (local + remote)
+git branch -a
+
+# Create a new branch (but stay on current one)
+git branch new-branch
+
+# Create and switch to a new branch
+git checkout -b new-branch
+
+# Switch to another branch
+git checkout branch-name
+
+# Delete a local branch
+git branch -d branch-name
+
+# Delete a remote branch
+git push origin --delete branch-name
+
+# Push to a different branch name on remote
+git push origin local-branch:remote-branch
+
+# Example: push current branch to "dev"
+git push origin HEAD:dev
+
+# Pull changes from another branch into current branch
+git pull origin other-branch
+
+# Fetch all branches from remote (without merging)
+git fetch --all
+
+# Merge another branch into current branch
+git merge branch-name
+
+# Rebase current branch on top of another branch
+git rebase branch-name
+
+# Undo last commit but keep changes staged
+git reset --soft HEAD~1
+
+# Undo last commit and unstage changes
+git reset --mixed HEAD~1
+
+# Undo last commit and discard changes
+git reset --hard HEAD~1
+
+# Discard all local changes
+git checkout -- .
+
+# Clone a repo
+git clone https://github.com/user/repo.git
+
+# Add a new remote
+git remote add origin https://github.com/user/repo.git
+
+# Check remotes
+git remote -v

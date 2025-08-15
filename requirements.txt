@@ -1,0 +1,28 @@
+# Essential dependencies for MVP
+python-dotenv
+pydantic
+
+# LangChain & LangGraph (latest stable versions)
+langchain
+langchain-openai
+langchain-anthropic
+langgraph
+langgraph-cli
+langsmith
+langchain-mcp-adapters
+
+# CLI
+typer[all]
+rich
+
+# HTTP client for LangGraph API
+httpx
+
+# Logging
+structlog
+
+# Google Workspace API dependencies
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
