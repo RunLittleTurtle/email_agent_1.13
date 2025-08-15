@@ -16,22 +16,22 @@ class AdaptiveWriterAgent(BaseAgent):
     Agent responsible for generating email responses.
     Adapts writing style based on context and intent.
     """
-    
+
     def __init__(self):
         super().__init__(
             name="adaptive_writer",
             model="gpt-4o",
             temperature=0.7  # Higher temperature for more creative writing
         )
-    
+
     @traceable(name="adaptive_writer_process", tags=["agent", "writer"])
     async def process(self, state: AgentState) -> AgentState:
         """
         Generate email response based on all gathered context
-        
+
         Args:
             state: Current workflow state
-            
+
         Returns:
             Updated state with draft response
         """
@@ -39,47 +39,69 @@ class AdaptiveWriterAgent(BaseAgent):
             if not state.email:
                 state.add_error("No email to respond to")
                 return state
-            
+
             self.logger.info("Generating email response")
-            
+
             # Check if this is a feedback refinement iteration
             is_refinement = state.response_metadata.get("routing", {}).get("is_refinement", False)
             feedback_context = state.response_metadata.get("feedback_context", {})
-            
+
             if is_refinement:
                 self.logger.info(f"🔄 Processing feedback refinement iteration {feedback_context.get('refinement_iteration', 1)}")
-            
+
             # Gather all context for response generation
             context_parts = []
-            
+
             # Add email parsing results
             if "email_parsing" in state.response_metadata:
                 parsing = state.response_metadata["email_parsing"]
                 context_parts.append(f"Email Summary: {parsing.get('summary', 'N/A')}")
                 context_parts.append(f"Main Request: {parsing.get('main_request', 'N/A')}")
-            
+
             # Add extracted context
             if state.extracted_context:
                 context_parts.append(f"Key Entities: {', '.join(state.extracted_context.key_entities)}")
                 context_parts.append(f"Urgency: {state.extracted_context.urgency_level}")
                 context_parts.append(f"Actions Requested: {', '.join(state.extracted_context.requested_actions)}")
-            
+
             # Add detailed specialized agent results
             routing_info = state.response_metadata.get("routing", {})
             completion_summary = routing_info.get("completion_summary", {})
-            
+
             # Add calendar agent results
-            if state.calendar_data and state.calendar_data.meeting_request:
+            if state.calendar_data:
                 context_parts.append("\n📅 Calendar Information:")
-                meeting = state.calendar_data.meeting_request
-                context_parts.append(f"  - Meeting: {meeting.get('title', 'Untitled')}")
+
+                if state.calendar_data.meeting_request:
+                    meeting = state.calendar_data.meeting_request
+                    context_parts.append(f"  - Meeting: {meeting.get('title', 'Untitled')}")
+                    context_parts.append(f"  - Requested time: {meeting.get('requested_datetime', 'Not specified')}")
+
+                # Check for conflicts and alternative times
+                if state.calendar_data.action_taken == "conflict_detected":
+                    context_parts.append(f"  - STATUS: CONFLICT DETECTED at requested time")
+                    if state.calendar_data.suggested_times:
+                        context_parts.append(f"  - Alternative times available:")
+                        for i, time in enumerate(state.calendar_data.suggested_times[:3], 1):
+                            context_parts.append(f"    {i}. {time}")
+                elif state.calendar_data.action_taken == "meeting_booked":
+                    context_parts.append(f"  - STATUS: Meeting successfully scheduled")
+                    if state.calendar_data.booked_event:
+                        event = state.calendar_data.booked_event
+                        context_parts.append(f"  - Confirmed: {event.get('summary', 'Meeting')}")
+                        context_parts.append(f"  - Date/Time: {event.get('datetime', 'Not specified')}")
+                        if event.get('meeting_link'):
+                            context_parts.append(f"  - Meeting Link: {event.get('meeting_link')}")
+                        if event.get('attendees'):
+                            context_parts.append(f"  - Attendees: {', '.join(event.get('attendees', []))}")
+                else:
+                    context_parts.append(f"  - STATUS: {state.calendar_data.action_taken}")
+
                 if state.calendar_data.availability:
                     avail = state.calendar_data.availability
                     context_parts.append(f"  - Available slots: {len(avail.get('available', []))}")
                     context_parts.append(f"  - Conflicts: {len(avail.get('conflicts', []))}")
-                if state.calendar_data.suggested_times:
-                    context_parts.append(f"  - Alternative times suggested: {len(state.calendar_data.suggested_times)}")
-            
+
             # Add document search results
             if state.document_data and state.document_data.found_documents:
                 context_parts.append("\n📄 Document Search Results:")
@@ -89,7 +111,7 @@ class AdaptiveWriterAgent(BaseAgent):
                         context_parts.append(f"    Summary: {doc['content_summary'][:100]}...")
                 if state.document_data.missing_documents:
                     context_parts.append(f"  - Not found: {', '.join(state.document_data.missing_documents)}")
-            
+
             # Add contact/CRM results
             if state.contact_data and state.contact_data.contacts:
                 context_parts.append("\n👥 Contact Information:")
@@ -99,27 +121,27 @@ class AdaptiveWriterAgent(BaseAgent):
                     ctx = state.contact_data.relationship_context
                     if ctx.get('delegation_ready'):
                         context_parts.append(f"  - Task delegation ready for {len(ctx.get('assignees', []))} people")
-            
+
             # Add completion summary if some agents failed
             if completion_summary:
                 failed = completion_summary.get("failed", [])
                 if failed:
                     context_parts.append(f"\n⚠️ Note: Some information may be incomplete ({', '.join(failed)} failed)")
-            
+
             # System prompt for response generation
             system_prompt = """You are a professional email response writer.
             Generate appropriate, contextual email responses.
             Match the tone and formality of the original email.
             Be concise but complete.
             Always maintain a professional and helpful tone."""
-            
+
             # Build feedback context for refinement iterations
             feedback_prompt_section = ""
             if is_refinement and feedback_context:
                 all_feedback = feedback_context.get("all_feedback", [])
                 previous_draft = feedback_context.get("previous_draft", "")
                 iteration = feedback_context.get("refinement_iteration", 1)
-                
+
                 feedback_prompt_section = f"""
 
 FEEDBACK REFINEMENT - Iteration {iteration}:
@@ -131,7 +153,7 @@ Human Feedback to Address:
 
 IMPORTANT: This is a refinement iteration. Please improve the previous draft based on the human feedback above.
 Address all feedback points while maintaining the email's core purpose and professionalism."""
-            
+
             # Create response generation prompt
             prompt = f"""Generate a response to this email:
 
@@ -164,7 +186,7 @@ Return the response in JSON format:
 
             # Call LLM
             response = await self._call_llm(prompt, system_prompt)
-            
+
             try:
                 response_data = json.loads(response)
                 self.logger.info(
@@ -172,30 +194,30 @@ Return the response in JSON format:
                     tone=response_data.get("tone"),
                     confidence=response_data.get("confidence")
                 )
-                
+
                 # Format the complete response
                 formatted_response = response_data.get("body", "")
-                
+
                 # Store draft response
                 state.draft_response = formatted_response
                 state.response_metadata["generated_response"] = response_data
-                
+
                 # Add message
                 self._add_message(
                     state,
                     f"Draft response generated with {response_data.get('confidence', 0):.0%} confidence",
                     metadata=response_data
                 )
-                
+
                 return state
-                
+
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse response generation: {e}")
                 # Try to extract response from raw text
                 state.draft_response = response
                 state.add_error(f"Response parsing failed, using raw response: {str(e)}")
                 return state
-                
+
         except Exception as e:
             self.logger.error(f"Response generation failed: {str(e)}", exc_info=True)
             state.add_error(f"Response generation failed: {str(e)}")
