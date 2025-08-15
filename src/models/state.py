@@ -55,7 +55,13 @@ class CalendarData(BaseModel):
     """Calendar-specific data from CalendarAgent"""
     meeting_request: Optional[Dict[str, Any]] = None
     availability: Optional[Dict[str, Any]] = None
-    suggested_times: List[datetime] = Field(default_factory=list)
+    suggested_times: List[Dict[str, Any]] = Field(default_factory=list)
+    action_taken: Optional[str] = None
+    availability_status: Optional[str] = None
+    message: Optional[str] = None
+    booked_event: Optional[Dict[str, Any]] = None
+    attendees_notified: List[str] = Field(default_factory=list)
+    conflicts: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DocumentData(BaseModel):

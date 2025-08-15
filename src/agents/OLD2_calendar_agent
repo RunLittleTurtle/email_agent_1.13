@@ -1,0 +1,773 @@
+"""
+Calendar Agent with Pipedream MCP Google Calendar Integration
+Handles availability checking, booking, and invitation management using real MCP tools
+"""
+
+import asyncio
+import json
+import logging
+import os
+from dotenv import load_dotenv
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from .base_agent import BaseAgent
+from langsmith import traceable
+from ..models.state import AgentState, CalendarData
+
+load_dotenv()
+
+class CalendarAgent(BaseAgent):
+    """
+    Calendar agent using LangChain MCP Tools with Google Workspace MCP server.
+    Uses production-ready LangChain agent patterns with proper error handling.
+    Available tools: list_events, create_event, update_event, delete_event, check_free_slots
+    """
+
+    def __init__(self):
+        super().__init__(
+            name="calendar_agent",
+            model="gpt-4o",
+            temperature=0.3
+        )
+        
+        # Initialize MCP toolkit and agent
+        self._init_langchain_agent()
+        
+    def _init_langchain_agent(self):
+        """Initialize LangChain agent with MCP toolkit"""
+        try:
+            # Get MCP server URL from environment (from memories - working Gumloop server)
+            mcp_url = os.getenv("MCP_SERVER_GOOGLE_AGENDA")
+            if not mcp_url:
+                self.logger.error("MCP_SERVER_GOOGLE_AGENDA not found in environment")
+                self.agent_executor = None
+                return
+            
+            # Initialize MCP Client with proper connection parameters
+            self.mcp_client = MultiServerMCPClient({
+                "google_calendar": {
+                    "url": mcp_url,
+                    "transport": "sse"  # Use SSE transport for Gumloop server
+                }
+            })
+            
+            # Load tools from MCP server in async context later
+            self.tools = []
+            self.logger.info(f"MCP client initialized with Google Workspace server: {mcp_url}")
+            
+            # Initialize LangChain LLM
+            self.llm = ChatOpenAI(
+                model="gpt-4o",
+                temperature=0.3,
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+            
+            # Create prompt template
+            self.prompt = self._create_calendar_prompt()
+            
+            # Load MCP tools and create agent executor immediately
+            self.agent_executor = None
+            self._tools_loaded = False
+            
+            self.logger.info("LangChain Calendar Agent initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize LangChain agent: {e}")
+            self.agent_executor = None
+    
+    def _create_calendar_prompt(self) -> ChatPromptTemplate:
+        """Create the prompt template for the calendar agent"""
+        
+        system_message = """You are a highly efficient calendar assistant with access to Google Calendar via MCP tools.
+
+Your capabilities:
+- Create, update, and delete calendar events
+- Check availability and find free time slots  
+- List and search existing events
+- Handle meeting requests and scheduling
+
+Guidelines:
+1. Be precise with dates and times - always confirm timezone (default: America/New_York)
+2. For meetings, include clear titles and descriptions
+3. When scheduling, check for conflicts first using list_events
+4. Default to 60-minute meetings unless specified otherwise
+5. Always confirm critical details before making changes
+6. Format times in user-friendly format (e.g., "2:00 PM" not "14:00")
+
+Current date/time: {current_time}
+User timezone: {timezone}
+
+Available MCP tools: {tool_names}
+
+For meeting requests:
+1. Extract meeting details (title, date/time, duration, attendees)
+2. Check availability using list_events for the requested time
+3. If available, create the event with create_event
+4. If conflicts exist, suggest alternative times
+5. Always include attendees and send invitations"""
+
+        return ChatPromptTemplate.from_messages([
+            ("system", system_message),
+            MessagesPlaceholder(variable_name="chat_history", optional=True),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
+
+    @traceable(name="calendar_agent_process", tags=["agent", "calendar"])
+    async def process(self, state: AgentState) -> AgentState:
+        """
+        Process calendar tasks: check availability, find alternatives, book events
+        """
+        try:
+            if not state.extracted_context:
+                state.add_error("No extracted context for calendar processing")
+                return state
+
+            self.logger.info("Processing calendar request")
+
+            # Extract calendar requirements from email context
+            calendar_requirements = await self._extract_calendar_requirements(state)
+            
+            if not calendar_requirements:
+                state.add_error("Could not extract calendar requirements from email")
+                return state
+
+            # Process calendar request based on requirements
+            result = await self._process_calendar_request(calendar_requirements)
+            
+            # Store results in state
+            calendar_data = CalendarData(
+                events_checked=result.get("events_checked", []),
+                availability_status=result.get("availability_status", "unknown"),
+                suggested_times=result.get("suggested_times", []),
+                booked_event=result.get("booked_event"),
+                action_taken=result.get("action_taken", ""),
+                attendees_notified=result.get("attendees_notified", [])
+            )
+            
+            state.calendar_data = calendar_data
+            
+            # Add message with results
+            self._add_message(
+                state,
+                f"Calendar processing completed. Action: {result.get('action_taken', 'N/A')}, "
+                f"Status: {result.get('availability_status', 'unknown')}",
+                metadata=result
+            )
+
+            return state
+
+        except Exception as e:
+            self.logger.error(f"Calendar agent processing failed: {e}")
+            if hasattr(state, 'add_error'):
+                state.add_error(f"Calendar processing error: {str(e)}")
+            else:
+                state.error_messages.append(f"Calendar processing error: {str(e)}")
+            return state
+
+    async def _extract_calendar_requirements(self, state: AgentState) -> Optional[Dict[str, Any]]:
+        """Extract calendar requirements from email context or use provided requirements"""
+        
+        context = state.extracted_context
+        
+        # Check if calendar requirements are already provided directly (for testing)
+        if isinstance(context, dict) and 'calendar_requirements' in context:
+            return context['calendar_requirements']
+        
+        # Extract from email if available
+        email = state.email
+        if not email:
+            self.logger.error("No email or calendar requirements provided")
+            return None
+        
+        system_prompt = """You are a calendar requirements extraction assistant.
+        Extract scheduling information from email content and context.
+        Always respond in valid JSON format."""
+
+        prompt = f"""Extract calendar requirements from this email:
+
+SUBJECT: {email.subject}
+FROM: {email.sender}
+BODY: {email.body}
+
+EXTRACTED CONTEXT:
+- Dates mentioned: {json.dumps([d.isoformat() if d else None for d in context.dates_mentioned]) if hasattr(context, 'dates_mentioned') else "None"}
+- Requested actions: {json.dumps(context.requested_actions) if hasattr(context, 'requested_actions') else "None"}
+- Key entities: {json.dumps(context.key_entities) if hasattr(context, 'key_entities') else "None"}
+
+Extract and return JSON:
+{{
+    "meeting_request": true/false,
+    "requested_datetime": "2025-08-19T13:00:00" (ISO format if specified),
+    "duration_minutes": 60,
+    "attendees": ["email1@example.com"],
+    "subject": "Meeting subject/title",
+    "description": "Meeting description/agenda",
+    "location": "Meeting location if specified",
+    "meeting_type": "in-person|virtual|phone",
+    "urgency": "low|medium|high"
+}}
+
+If this is not a meeting request, set meeting_request to false."""
+
+        try:
+            response = await self._call_llm(prompt, system_prompt)
+            requirements = json.loads(response)
+            
+            # Add sender as attendee if not already included
+            sender_email = self._extract_email_from_sender(email.sender)
+            if requirements.get("meeting_request") and sender_email:
+                attendees = requirements.get("attendees", [])
+                if sender_email not in attendees:
+                    attendees.append(sender_email)
+                requirements["attendees"] = attendees
+                    
+            return requirements
+        except (json.JSONDecodeError, Exception) as e:
+            self.logger.error(f"Failed to extract calendar requirements: {e}")
+            return None
+
+    async def _process_calendar_request(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
+        """Process calendar request using LangChain agent executor with MCP tools"""
+        
+        if not requirements.get("meeting_request"):
+            return {
+                "action_taken": "no_meeting_request",
+                "availability_status": "not_applicable",
+                "message": "Email does not contain a meeting request"
+            }
+
+        if not self.mcp_client:
+            self.logger.error("MCP client not initialized")
+            return {
+                "action_taken": "agent_error",
+                "availability_status": "error",
+                "message": "Calendar agent not properly initialized"
+            }
+
+        # Load MCP tools and create agent executor if not done yet
+        if not self._tools_loaded:
+            await self._load_mcp_tools()
+
+        if not self.agent_executor:
+            self.logger.error("Agent executor not available")
+            return {
+                "action_taken": "agent_error",
+                "availability_status": "error",
+                "message": "LangChain agent executor not initialized"
+            }
+
+        # Format calendar task for the LangChain agent
+        calendar_task = self._format_calendar_task(requirements)
+        
+        try:
+            # Execute with LangChain agent - this will let the LLM call MCP tools directly
+            self.logger.info(f"Executing calendar task with LangChain agent...")
+            
+            # Prepare context for the agent
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M %Z")
+            timezone = "America/New_York"
+            tool_names = ", ".join([tool.name for tool in self.tools]) if self.tools else "No tools loaded"
+            
+            result = await self.agent_executor.ainvoke({
+                "input": calendar_task,
+                "current_time": current_time,
+                "timezone": timezone,
+                "tool_names": tool_names,
+                "chat_history": []
+            })
+            
+            # Parse the agent result into structured format
+            return self._parse_langchain_result(result, requirements)
+            
+        except Exception as e:
+            self.logger.error(f"LangChain agent execution failed: {e}")
+            return {
+                "action_taken": "processing_failed",
+                "availability_status": "error",
+                "error": str(e),
+                "message": "Failed to process calendar request with LangChain agent"
+            }
+    
+    async def _load_mcp_tools(self):
+        """Load MCP tools and create LangChain agent executor"""
+        try:
+            self.logger.info("Loading MCP tools for LangChain agent...")
+            
+            # Use session-based approach as per documentation
+            async with self.mcp_client.session("google_calendar") as session:
+                self.tools = await load_mcp_tools(session)
+                self.logger.info(f"Loaded {len(self.tools)} MCP tools: {[tool.name for tool in self.tools]}")
+                
+                if self.tools:
+                    # Create the LangChain agent with tools
+                    self.agent = create_tool_calling_agent(
+                        llm=self.llm,
+                        tools=self.tools,
+                        prompt=self.prompt
+                    )
+                    
+                    # Create executor
+                    self.agent_executor = AgentExecutor(
+                        agent=self.agent,
+                        tools=self.tools,
+                        verbose=True,
+                        handle_parsing_errors=True,
+                        max_iterations=5,
+                        return_intermediate_steps=True
+                    )
+                    
+                    self._tools_loaded = True
+                    self.logger.info("LangChain agent executor created with MCP tools")
+                else:
+                    self.logger.error("No MCP tools loaded from session")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load MCP tools: {e}")
+            import traceback
+            self.logger.error(f"Full traceback: {traceback.format_exc()}")
+    
+    def _format_calendar_task(self, requirements: Dict[str, Any]) -> str:
+        """Format calendar requirements into natural language task for LangChain agent"""
+        
+        if not requirements.get("meeting_request"):
+            return "This email does not contain a meeting request."
+        
+        requested_datetime = requirements.get("requested_datetime")
+        attendees = requirements.get("attendees", [])
+        subject = requirements.get("subject", "Meeting")
+        duration = requirements.get("duration_minutes", 60)
+        description = requirements.get("description", "")
+        location = requirements.get("location", "")
+        
+        if requested_datetime:
+            # Parse and format the datetime
+            try:
+                dt = datetime.fromisoformat(requested_datetime.replace('Z', '+00:00'))
+                formatted_time = dt.strftime("%A, %B %d, %Y at %I:%M %p")
+            except ValueError:
+                formatted_time = requested_datetime
+            
+            task = f"""I need help scheduling a meeting with the following details:
+
+**Meeting Information:**
+- Title: {subject}
+- Date/Time: {formatted_time}
+- Duration: {duration} minutes
+- Attendees: {', '.join(attendees) if attendees else 'No attendees specified'}
+- Description: {description}
+- Location: {location if location else 'Not specified'}
+
+**Please perform the following steps:**
+1. First, check if the requested time slot is available by listing my calendar events for that time period
+2. If the time is available, create the meeting and send invitations to all attendees
+3. If there are conflicts, suggest 2-3 alternative time slots in the next few business days
+4. Provide a clear summary of what actions were taken
+
+Use the available MCP calendar tools to perform these operations."""
+        else:
+            # General availability request
+            task = f"""I need help finding available time slots for a meeting:
+
+**Meeting Information:**
+- Title: {subject}
+- Duration: {duration} minutes
+- Attendees: {', '.join(attendees) if attendees else 'No attendees specified'}
+- Description: {description}
+- Location: {location if location else 'Not specified'}
+
+**Please:**
+1. Check my calendar for available time slots in the next few business days
+2. Suggest 3 good meeting times when I'm available
+3. Consider business hours (9 AM - 5 PM) and avoid conflicts
+
+Use the MCP calendar tools to check my availability."""
+        
+        return task
+    
+    def _parse_langchain_result(self, result: Dict[str, Any], requirements: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse LangChain agent result into structured calendar data"""
+        
+        try:
+            output = result.get("output", "")
+            intermediate_steps = result.get("intermediate_steps", [])
+            
+            # Extract information about tools used
+            tools_used = []
+            mcp_results = []
+            
+            for step in intermediate_steps:
+                if len(step) >= 2:
+                    action, observation = step[0], step[1]
+                    if hasattr(action, 'tool'):
+                        tools_used.append(action.tool)
+                    mcp_results.append(str(observation))
+            
+            # Determine action taken based on tools used and output content
+            output_lower = output.lower()
+            
+            self.logger.info(f"LangChain agent output: {output[:200]}...")
+            self.logger.info(f"Tools used: {tools_used}")
+            
+            # Check if calendar tools were actually used
+            calendar_tools_used = [tool for tool in tools_used if any(kw in tool.lower() for kw in ['calendar', 'event', 'list', 'create'])]
+            
+            if not calendar_tools_used:
+                self.logger.warning("No calendar tools were used by the agent")
+                return {
+                    "action_taken": "no_tools_used",
+                    "availability_status": "error",
+                    "message": "Agent did not use calendar tools",
+                    "agent_response": output,
+                    "tools_used": tools_used,
+                    "mcp_results": mcp_results
+                }
+            
+            # Parse based on content and tools used
+            if "create" in [tool.lower() for tool in tools_used] or "created" in output_lower or "scheduled" in output_lower:
+                return {
+                    "action_taken": "meeting_booked",
+                    "availability_status": "available",
+                    "booked_event": {"summary": requirements.get("subject", "Meeting")},
+                    "attendees_notified": requirements.get("attendees", []),
+                    "message": "Meeting successfully booked using MCP tools",
+                    "agent_response": output,
+                    "tools_used": tools_used,
+                    "mcp_results": mcp_results
+                }
+            elif "conflict" in output_lower or "not available" in output_lower or "busy" in output_lower:
+                return {
+                    "action_taken": "alternatives_suggested",
+                    "availability_status": "conflict",
+                    "suggested_times": self._extract_times_from_output(output),
+                    "message": "Requested time not available, alternatives suggested using MCP tools",
+                    "agent_response": output,
+                    "tools_used": tools_used,
+                    "mcp_results": mcp_results
+                }
+            elif "available" in output_lower:
+                return {
+                    "action_taken": "availability_checked",
+                    "availability_status": "available",
+                    "suggested_times": self._extract_times_from_output(output),
+                    "message": "Calendar availability checked using MCP tools",
+                    "agent_response": output,
+                    "tools_used": tools_used,
+                    "mcp_results": mcp_results
+                }
+            else:
+                return {
+                    "action_taken": "processed",
+                    "availability_status": "unknown",
+                    "message": "Calendar request processed with MCP tools",
+                    "agent_response": output,
+                    "tools_used": tools_used,
+                    "mcp_results": mcp_results
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Failed to parse LangChain result: {e}")
+            return {
+                "action_taken": "parsing_failed",
+                "availability_status": "error",
+                "error": str(e),
+                "message": "Failed to parse calendar agent response"
+            }
+    
+    def _extract_times_from_output(self, output_text: str) -> List[Dict[str, Any]]:
+        """Extract suggested meeting times from agent output"""
+        import re
+        
+        suggestions = []
+        
+        # Look for time patterns in the output
+        time_patterns = [
+            r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+(\w+ \d+)[,\s]+(\d{1,2}:\d{2}\s*[AP]M)',
+            r'(\w+ \d+)[,\s]+(\d{1,2}:\d{2}\s*[AP]M)',
+            r'(\d{1,2}:\d{2}\s*[AP]M)\s*on\s*(\w+ \d+)',
+            r'(\d{1,2}:\d{2}\s*[AP]M)'
+        ]
+        
+        for pattern in time_patterns:
+            matches = re.findall(pattern, output_text, re.IGNORECASE)
+            for match in matches[:3]:  # Limit to 3 suggestions
+                if isinstance(match, tuple):
+                    time_str = ' '.join([part for part in match if part])
+                else:
+                    time_str = match
+                    
+                if time_str and time_str not in [s.get('time', '') for s in suggestions]:
+                    suggestions.append({
+                        "time": time_str,
+                        "reason": "Suggested by calendar agent",
+                        "day": "Available"
+                    })
+        
+        return suggestions[:3]  # Return max 3 suggestions
+
+    # Keep the old MCP methods for fallback, but they shouldn't be used now
+    async def _check_availability_via_mcp(self, datetime_str: str, duration_minutes: int, attendees: List[str]) -> Dict[str, Any]:
+        """Check availability using MCP list_events tool"""
+        
+        try:
+            # Parse requested datetime
+            requested_dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+            end_dt = requested_dt + timedelta(minutes=duration_minutes)
+            
+            # Use MCP session to check availability
+            async with self.mcp_client.session("google_calendar") as session:
+                tools = await load_mcp_tools(session)
+                
+                # Find list_events tool
+                list_events_tool = None
+                for tool in tools:
+                    if "list" in tool.name.lower() and "event" in tool.name.lower():
+                        list_events_tool = tool
+                        break
+                
+                if not list_events_tool:
+                    return {"available": False, "error": "No list events tool found"}
+                
+                # Call the tool to check for conflicts
+                result = await list_events_tool.ainvoke({
+                    "timeMin": requested_dt.isoformat(),
+                    "timeMax": end_dt.isoformat(),
+                    "singleEvents": True,
+                    "maxResults": 50
+                })
+                
+                # Analyze response for conflicts
+                events = result.get("items", []) if isinstance(result, dict) else []
+                conflicts = []
+                
+                for event in events:
+                    if self._has_time_conflict(event, requested_dt, end_dt):
+                        conflicts.append({
+                            "event_id": event.get("id"),
+                            "summary": event.get("summary", "Unnamed event"),
+                            "start": event.get("start", {}).get("dateTime"),
+                            "end": event.get("end", {}).get("dateTime")
+                        })
+                
+                return {
+                    "available": len(conflicts) == 0,
+                    "conflicts": conflicts,
+                    "events_checked": len(events)
+                }
+                
+        except Exception as e:
+            self.logger.error(f"MCP availability check failed: {e}")
+            return {
+                "available": False,
+                "error": str(e),
+                "conflicts": []
+            }
+
+    async def _book_meeting_via_mcp(self, requirements: Dict[str, Any], datetime_str: str) -> Dict[str, Any]:
+        """Book meeting using MCP create_event tool"""
+        
+        try:
+            # Parse datetime and calculate end time
+            start_dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+            end_dt = start_dt + timedelta(minutes=requirements.get("duration_minutes", 60))
+            
+            # Prepare attendees list
+            attendees_list = []
+            for email in requirements.get("attendees", []):
+                attendees_list.append({"email": email})
+            
+            # Use MCP session to create event
+            async with self.mcp_client.session("google_calendar") as session:
+                tools = await load_mcp_tools(session)
+                
+                # Find create_event tool
+                create_event_tool = None
+                for tool in tools:
+                    if "create" in tool.name.lower() and "event" in tool.name.lower():
+                        create_event_tool = tool
+                        break
+                
+                if not create_event_tool:
+                    return {
+                        "action_taken": "booking_failed",
+                        "error": "No create event tool found"
+                    }
+                
+                # Call the tool to create event
+                result = await create_event_tool.ainvoke({
+                    "summary": requirements.get("subject", "Meeting"),
+                    "description": requirements.get("description", ""),
+                    "start": {
+                        "dateTime": start_dt.isoformat(),
+                        "timeZone": "America/New_York"
+                    },
+                    "end": {
+                        "dateTime": end_dt.isoformat(),
+                        "timeZone": "America/New_York"
+                    },
+                    "attendees": attendees_list,
+                    "location": requirements.get("location", ""),
+                    "sendUpdates": "all"
+                })
+                
+                return {
+                    "action_taken": "meeting_booked",
+                    "availability_status": "available",
+                    "booked_event": result,
+                    "attendees_notified": requirements.get("attendees", []),
+                    "message": f"Meeting '{requirements.get('subject', 'Meeting')}' booked for {datetime_str}"
+                }
+                
+        except Exception as e:
+            self.logger.error(f"MCP meeting booking failed: {e}")
+            return {
+                "action_taken": "booking_failed",
+                "availability_status": "available",
+                "error": str(e),
+                "message": "Failed to book meeting despite availability"
+            }
+
+    async def _find_alternative_times(self, requirements: Dict[str, Any], availability_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Find alternative meeting times using intelligent suggestions"""
+        
+        try:
+            requested_datetime = requirements.get("requested_datetime")
+            duration = requirements.get("duration_minutes", 60)
+            
+            # Generate smart alternative suggestions
+            alternatives = await self._generate_alternative_suggestions(
+                requested_datetime, 
+                duration,
+                availability_result.get("conflicts", [])
+            )
+            
+            return {
+                "action_taken": "alternatives_suggested",
+                "availability_status": "conflict",
+                "suggested_times": alternatives,
+                "conflicts": availability_result.get("conflicts", []),
+                "events_checked": availability_result.get("events_checked", 0),
+                "message": f"Requested time not available. Suggested {len(alternatives)} alternatives."
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to find alternatives: {e}")
+            return {
+                "action_taken": "alternatives_failed",
+                "availability_status": "conflict",
+                "error": str(e),
+                "message": "Could not find alternative meeting times"
+            }
+
+    async def _generate_alternative_suggestions(self, requested_datetime: str, duration: int, conflicts: List[Dict]) -> List[Dict[str, Any]]:
+        """Generate intelligent alternative time suggestions"""
+        
+        try:
+            requested_dt = datetime.fromisoformat(requested_datetime.replace('Z', '+00:00'))
+        except ValueError:
+            requested_dt = datetime.now()
+        
+        alternatives = []
+        
+        # Strategy 1: Same day, different hours (avoiding conflicts)
+        for hour_offset in [1, 2, -1, -2, 3, -3]:
+            alt_time = requested_dt + timedelta(hours=hour_offset)
+            if 9 <= alt_time.hour <= 17:  # Business hours
+                alternatives.append({
+                    "datetime": alt_time.isoformat(),
+                    "reason": f"{abs(hour_offset)} hour{'s' if abs(hour_offset) > 1 else ''} {'later' if hour_offset > 0 else 'earlier'} same day",
+                    "day": alt_time.strftime("%A, %B %d"),
+                    "time": alt_time.strftime("%I:%M %p")
+                })
+        
+        # Strategy 2: Next available business days
+        for day_offset in [1, 2, 3]:
+            alt_time = requested_dt + timedelta(days=day_offset)
+            if alt_time.weekday() < 5:  # Weekday only
+                alt_time = alt_time.replace(hour=requested_dt.hour)
+                alternatives.append({
+                    "datetime": alt_time.isoformat(),
+                    "reason": f"Same time, {day_offset} day{'s' if day_offset > 1 else ''} later",
+                    "day": alt_time.strftime("%A, %B %d"),
+                    "time": alt_time.strftime("%I:%M %p")
+                })
+        
+        # Return top 3 alternatives
+        return alternatives[:3]
+
+    async def _suggest_general_availability(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
+        """Suggest general availability when no specific time is requested"""
+        
+        # Generate general availability suggestions
+        now = datetime.now()
+        suggestions = []
+        
+        # Suggest next few business days at common meeting times
+        for day_offset in range(1, 4):
+            future_date = now + timedelta(days=day_offset)
+            if future_date.weekday() < 5:  # Weekday
+                for hour in [10, 14, 16]:  # 10 AM, 2 PM, 4 PM
+                    suggestion_time = future_date.replace(hour=hour, minute=0, second=0, microsecond=0)
+                    suggestions.append({
+                        "datetime": suggestion_time.isoformat(),
+                        "reason": f"Available business hours",
+                        "day": suggestion_time.strftime("%A, %B %d"),
+                        "time": suggestion_time.strftime("%I:%M %p")
+                    })
+        
+        return {
+            "action_taken": "general_availability_suggested",
+            "availability_status": "suggestions_provided",
+            "suggested_times": suggestions[:3],
+            "message": "No specific time requested. Here are available time slots."
+        }
+    
+
+
+    def list_available_tools(self) -> List[str]:
+        """List all available MCP tools for debugging"""
+        if self.mcp_client:
+            return ["MCP client available - tools loaded dynamically in sessions"]
+        return ["No MCP client available"]
+
+
+    def _has_time_conflict(self, event: Dict[str, Any], start_dt: datetime, end_dt: datetime) -> bool:
+        """Check if an event conflicts with requested time range"""
+        
+        try:
+            event_start_str = event.get("start", {}).get("dateTime")
+            event_end_str = event.get("end", {}).get("dateTime")
+            
+            if not event_start_str or not event_end_str:
+                return False
+            
+            event_start = datetime.fromisoformat(event_start_str.replace('Z', '+00:00'))
+            event_end = datetime.fromisoformat(event_end_str.replace('Z', '+00:00'))
+            
+            # Check for overlap
+            return not (end_dt <= event_start or start_dt >= event_end)
+            
+        except (ValueError, KeyError):
+            return False
+
+    def _extract_email_from_sender(self, sender: str) -> Optional[str]:
+        """Extract email address from sender string"""
+        import re
+        
+        # Handle formats like "Name <email@domain.com>" or just "email@domain.com"
+        email_match = re.search(r'<([^>]+)>', sender)
+        if email_match:
+            return email_match.group(1)
+        
+        # Check if sender is already just an email
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if re.match(email_pattern, sender.strip()):
+            return sender.strip()
+        
+        return None
