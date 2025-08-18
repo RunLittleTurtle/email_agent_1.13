@@ -128,6 +128,15 @@ class AdaptiveWriterAgent(BaseAgent):
                 if failed:
                     context_parts.append(f"\n⚠️ Note: Some information may be incomplete ({', '.join(failed)} failed)")
 
+            # Add full agent outputs for detailed context
+            if hasattr(state, 'output') and state.output:
+                context_parts.append("\n🤖 Detailed Agent Outputs:")
+                for output in state.output:
+                    agent_name = output.get("agent", "Unknown Agent")
+                    message = output.get("message", "")
+                    if message:
+                        context_parts.append(f"  • {agent_name}: {message}")
+
             # System prompt for response generation
             system_prompt = """You are a professional email response writer.
             Generate appropriate, contextual email responses.
@@ -174,7 +183,8 @@ Generate a professional email response that:
 4. Is clear and concise
 5. Includes a proper greeting and closing{' and addresses all human feedback' if is_refinement else ''}
 6. Incorporates relevant information from calendar, documents, and contacts as needed
-7. If some information is missing due to agent failures, acknowledge this appropriately
+7. Use the complete OUTPUT of the specialized agents like the calendar agent, document agent, and contact agent
+8. If some information is missing due to agent failures, acknowledge this appropriately
 
 Return the response in JSON format:
 {{

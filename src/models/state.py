@@ -101,6 +101,10 @@ class AgentState(BaseModel):
     # Response generation
     draft_response: Optional[str] = None
     response_metadata: Dict[str, Any] = Field(default_factory=dict)
+    output: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Agent output messages for downstream consumption"
+    )
     
     # Workflow control
     current_agent: Optional[str] = None

@@ -106,6 +106,27 @@ class CalendarAgent(BaseAgent):
 
             self.logger.info(f"Agent execution completed: {result}")
 
+            # Get the last AI message and add it to output
+            messages_list = result.get("messages", [])
+            if messages_list:
+                last_message = messages_list[-1]
+
+                # Get message content
+                if hasattr(last_message, 'content'):
+                    ai_response = last_message.content
+                else:
+                    ai_response = str(last_message)
+
+                # Initialize output if needed
+                if not hasattr(state, 'output'):
+                    state.output = []
+
+                # Add AI response to output
+                state.output.append({
+                    "agent": "CALENDAR AGENT",
+                    "message": ai_response
+                })
+
             # Parse and store results
             parsed_result = self._parse_agent_result(result, requirements)
 
@@ -129,17 +150,27 @@ class CalendarAgent(BaseAgent):
 
             state.calendar_data = calendar_data
 
-            # Enhanced message with conflict details for downstream agents
-            if parsed_result.get("action_taken") == "conflict_detected":
-                conflict_message = f"Calendar: CONFLICT DETECTED - Alternative times suggested: {parsed_result.get('suggested_times', [])}"
+            # Use the full AI response instead of a summary for downstream agents
+            # The AI response already contains detailed conflict detection reasoning
+            if messages_list and hasattr(messages_list[-1], 'content'):
+                full_ai_response = messages_list[-1].content
+                self._add_message(
+                    state,
+                    f"Calendar Agent: {full_ai_response}",
+                    metadata=parsed_result
+                )
             else:
-                conflict_message = f"Calendar: {parsed_result.get('action_taken', 'processed')}"
+                # Fallback to summary if no AI content available
+                if parsed_result.get("action_taken") == "conflict_detected":
+                    conflict_message = f"Calendar: CONFLICT DETECTED - Alternative times suggested: {parsed_result.get('suggested_times', [])}"
+                else:
+                    conflict_message = f"Calendar: {parsed_result.get('action_taken', 'processed')}"
 
-            self._add_message(
-                state,
-                conflict_message,
-                metadata=parsed_result
-            )
+                self._add_message(
+                    state,
+                    conflict_message,
+                    metadata=parsed_result
+                )
 
             return state
 
@@ -165,15 +196,17 @@ Available tools allow you to:
 - Update existing events
 
 CONFLICT DETECTION WORKFLOW:
-1. MANDATORY: First check availability using the list events tool for the EXACT requested time slot
-2. CAREFULLY examine the tool response for ANY existing events that overlap with the requested time
-3. If there's ANY overlap or conflict (even partial):
-   - Do NOT create the event
-   - IMPORTANT: YOU MUST Search, Find and Propose 2 alternative available time slots (same day or next business days or later)
-   - Return the alternatives in this format: "CONFLICT_DETECTED: Alternative times: [time1, time2]"
-4. ONLY if there are NO conflicts whatsoever:
-   - Create the event using the create event tool
-   - Confirm creation
+1. Use list-events tool to check the requested time slot
+2. Examine the response carefully for ANY overlapping events
+3. If conflicts exist, suggest alternative times using the same tool
+
+CRITICAL SYNTHESIS REQUIREMENT:
+- You MUST ALWAYS review and synthesize ALL previous tool call results before giving your final response
+- NEVER ignore any tool call results - each tool call provides important information
+- If you made 2 tool calls, your response must reference findings from BOTH tool calls
+- If you made 3 tool calls, your response must reference findings from ALL 3 tool calls
+- Pattern: "I checked [location/time 1] - [result]. I also checked [location/time 2] - [result]. Therefore..."
+- Your final answer MUST demonstrate you considered every single tool call you made
 
 CRITICAL: You MUST examine the list events tool response thoroughly. Even if there are existing events close to the requested time, you must check for any time overlap. DO NOT create events if there are ANY conflicts detected in the tool response.
 
@@ -183,10 +216,14 @@ For meeting requests:
 3. If ANY conflict exists → suggest alternatives (do not book)
 4. If completely clear → create event
 5. Always report actual tool results
+6. SYNTHESIZE all tool call results in your final response
+
+Example of proper synthesis:
+"I checked Tuesday August 19th at 2 PM - this slot is available. I also checked Wednesday August 20th but found a conflict with an existing meeting from 10:30 AM to 2:30 PM. Therefore, I can offer Tuesday August 19th at 2 PM, or alternative times on different days."
 
 Timezone: America/New_York
 
-Remember: You must use tools, not just describe what you would do."""
+Remember: You must use tools, not just describe what you would do. Always synthesize ALL tool call results."""
 
     async def _extract_calendar_requirements(self, state: AgentState) -> Optional[Dict[str, Any]]:
         """Extract calendar requirements from email"""
@@ -247,7 +284,7 @@ Return JSON:
         """Validate and correct datetime to use current year if needed, with timezone"""
         try:
             from zoneinfo import ZoneInfo
-            
+
             # Parse the datetime string
             dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
 
@@ -312,6 +349,7 @@ WORKFLOW:
 3. If no conflict exists:
    - Create the event using create event tool with the exact datetime: {requested_datetime}
    - Confirm successful creation
+   - Add the link of the invitation in the OUTPUT
 
 IMPORTANT: Always check for conflicts before creating events. Use timezone-aware datetime strings."""
         else:
@@ -350,7 +388,8 @@ Suggest 3 business day options."""
                 "action_taken": "conflict_detected",
                 "availability_status": "conflict",
                 "suggested_times": suggested_times,
-                "message": "Meeting time conflicts with existing event. Alternative times suggested."
+                "message": output,  # Include full AI response with conflict details
+                "full_response": output
             }
 
         # Priority 2: Check for successful event creation
@@ -380,7 +419,8 @@ Suggest 3 business day options."""
                 "action_taken": "alternatives_needed",
                 "availability_status": "conflict",
                 "suggested_times": [],
-                "message": "Meeting time conflicts detected but no alternatives provided."
+                "message": output,  # Include full AI response with conflict details
+                "full_response": output
             }
 
         # Priority 4: Check for availability confirmation
@@ -407,8 +447,8 @@ Suggest 3 business day options."""
                 "message": output[:200]
             }
 
-    def _extract_alternative_times(self, output: str) -> List[str]:
-        """Extract alternative time slots from agent output"""
+    def _extract_alternative_times(self, output: str) -> List[Dict[str, Any]]:
+        """Extract alternative time slots from agent output and return as dictionaries"""
         import re
 
         # Look for the specific format: "Alternative times: [time1, time2]"
@@ -420,7 +460,8 @@ Suggest 3 business day options."""
             # Split by comma and clean up
             times = [time.strip().strip('"\'') for time in times_str.split(',')]
             self.logger.info(f"Extracted alternative times: {times}")
-            return times
+            # Convert to dict format
+            return [{"time_slot": time, "status": "suggested"} for time in times if time]
 
         # Fallback: look for time patterns in the output
         time_patterns = [
@@ -437,7 +478,8 @@ Suggest 3 business day options."""
         # Remove duplicates and limit to 2
         unique_times = list(dict.fromkeys(suggested_times))[:2]
         self.logger.info(f"Fallback extracted times: {unique_times}")
-        return unique_times
+        # Convert to dict format
+        return [{"time_slot": time, "status": "suggested"} for time in unique_times if time]
 
     def _extract_meeting_link(self, output: str) -> Optional[str]:
         """Extract meeting link from agent output"""

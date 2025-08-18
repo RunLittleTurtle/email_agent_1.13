@@ -5,7 +5,8 @@ pip install -r requirements.txt
 python cli.py status
 
 # 🚀 START EVERYTHING (One Command!)
-python cli.py start                   # Starts both LangGraph server + Agent Inbox UI
+python cli.py start                   # Starts both LangGraph server + Agent Inbox UI (use for agent inbox : http://localhost:2024)
+
 python cli.py start --langgraph-port 2025 --inbox-port 3001  # Custom other ports
 
 # Launch individual services
