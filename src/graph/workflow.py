@@ -16,7 +16,7 @@ from src.models.state import AgentState
 from src.agents.email_processor import EmailProcessorAgent
 from src.agents.supervisor import SupervisorAgent
 from src.agents.adaptive_writer import AdaptiveWriterAgent
-from src.agents.calendar_agent import CalendarAgent
+from src.agents.calendar_subgraph import create_calendar_subgraph
 from src.agents.rag_agent import RAGAgent
 from src.agents.crm_agent import CRMAgent
 from src.agents.email_sender import EmailSenderAgent
@@ -62,7 +62,7 @@ async def adaptive_writer_node(state: AgentState) -> AgentState:
 async def human_review_node(state: AgentState) -> AgentState:
     """Human-in-the-loop node using dynamic interrupt for Agent Inbox"""
     logger.info("⏸️ Human Review Node (Dynamic Interrupt for Agent Inbox)")
-    
+
     # Build email context for the interrupt - formatted for readability
     if state.email:
         # Format the received date nicely
@@ -77,12 +77,12 @@ async def human_review_node(state: AgentState) -> AgentState:
                 date_received = "Date not available"
         except Exception:
             date_received = "Date parsing error"
-        
+
         # Create a clean, formatted email context string with FULL body and date
         email_context_str = f"From: {state.email.sender}\nSubject: {state.email.subject}\nReceived: {date_received}\n\n{state.email.body}"
     else:
         email_context_str = "No email context available"
-    
+
     # Create descriptive action name with sender and subject for better UI display
     if state.email:
         # Truncate subject if too long for UI display
@@ -93,7 +93,7 @@ async def human_review_node(state: AgentState) -> AgentState:
     else:
         action_name = "📧 Email review (Unknown sender)"
         description_text = "Review draft response for email from Unknown sender"
-    
+
     # Dynamic interrupt using Agent Inbox expected structure
     human_response = interrupt({
         "action_request": {
@@ -112,19 +112,19 @@ async def human_review_node(state: AgentState) -> AgentState:
         },
         "description": description_text  # More descriptive description
     })
-    
+
     # Process human response when workflow is resumed
     if human_response:
         # Handle case where response might be a list (Agent Inbox can return updates as a list)
         if isinstance(human_response, list):
             # Take the last response if it's a list of updates
             human_response = human_response[-1] if human_response else None
-            
+
         if human_response and isinstance(human_response, dict):
             # Agent Inbox returns response in format: {"type": "accept|ignore|response|edit", "args": ...}
             response_type = human_response.get("type", "ignore")
             response_args = human_response.get("args")
-            
+
             # Map Agent Inbox response types to our workflow decisions
             if response_type == "accept":
                 state.response_metadata["decision"] = "accept"
@@ -143,7 +143,7 @@ async def human_review_node(state: AgentState) -> AgentState:
                         state.human_feedback = response_args.get("args", {}).get("draft_response", "")
                         state.draft_response = state.human_feedback  # Update draft with edited version
                 logger.info(f"✏️ Human provided instructions: {response_type}")
-            
+
             state.add_message("human", f"Decision: {state.response_metadata.get('decision', 'unknown')}")
         else:
             # Default to ignore if response format is unexpected
@@ -153,7 +153,7 @@ async def human_review_node(state: AgentState) -> AgentState:
         # Default to ignore if no response
         state.response_metadata["decision"] = "ignore"
         logger.info("⚠️ No human response received, defaulting to ignore")
-    
+
     return state
 
 
@@ -163,7 +163,7 @@ def create_workflow() -> StateGraph:
     Flow: email_processor -> supervisor -> (calendar/rag/crm) -> adaptive_writer -> human_review -> router
     """
     global email_processor_agent, supervisor_agent, adaptive_writer_agent
-    global calendar_agent, rag_agent, crm_agent, email_sender_agent
+    global rag_agent, crm_agent, email_sender_agent  # Removed calendar_agent from globals
 
     logger.info("🚀 Creating Agent Inbox Phase 2 Workflow with Multi-Agent Support...")
 
@@ -172,9 +172,12 @@ def create_workflow() -> StateGraph:
     supervisor_agent = SupervisorAgent()
     adaptive_writer_agent = AdaptiveWriterAgent()
     email_sender_agent = EmailSenderAgent()
-    calendar_agent = CalendarAgent()
+    # REMOVED: calendar_agent = CalendarAgent()
     rag_agent = RAGAgent()
     crm_agent = CRMAgent()
+
+    # Create the calendar subgraph
+    calendar_subgraph = create_calendar_subgraph()  # <-- NEW LINE
 
     # Create workflow with AgentState
     workflow = StateGraph(AgentState)
@@ -185,54 +188,52 @@ def create_workflow() -> StateGraph:
     workflow.add_node("adaptive_writer", adaptive_writer_node)
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("router", router_node)
-    
+
     # Add specialized agent nodes with traceable wrappers
-    @traceable
-    async def calendar_node(state: AgentState) -> AgentState:
-        logger.info("📅 Calendar Agent Node")
-        return await calendar_agent.ainvoke(state)
-    
+    # REMOVED the calendar_node function - no longer needed
+
     @traceable
     async def rag_node(state: AgentState) -> AgentState:
         logger.info("📄 RAG Agent Node")
         return await rag_agent.ainvoke(state)
-    
+
     @traceable
     async def crm_node(state: AgentState) -> AgentState:
         logger.info("👥 CRM Agent Node")
         return await crm_agent.ainvoke(state)
-    
-    workflow.add_node("calendar_agent", calendar_node)
+
+    # Add nodes - calendar_subgraph is added directly
+    workflow.add_node("calendar_agent", calendar_subgraph)  # This line stays as is!
     workflow.add_node("rag_agent", rag_node)
     workflow.add_node("crm_agent", crm_node)
-    
+
     # Add dedicated EmailSenderAgent node for robust email sending
     @traceable
     async def send_email_node(state: AgentState) -> AgentState:
         """Send the approved email response using dedicated EmailSenderAgent"""
         logger.info("📮 Send Email Node (Using EmailSenderAgent)")
         return await email_sender_agent.ainvoke(state)
-        
+
     workflow.add_node("send_email", send_email_node)
 
     # Define the flow
     workflow.set_entry_point("email_processor")
     workflow.add_edge("email_processor", "supervisor")
-    
+
     # Add conditional routing from supervisor to specialized agents or adaptive_writer
     def route_from_supervisor(state: AgentState) -> str:
         """Determine next node based on supervisor's routing decision"""
         routing = state.response_metadata.get("routing", {})
         next_agent = routing.get("next", "adaptive_writer")
-        
+
         # Track which agent we're routing to for completion detection
         if next_agent in ["calendar_agent", "rag_agent", "crm_agent"]:
             routing["last_routed_to"] = next_agent
             state.response_metadata["routing"] = routing
-        
+
         logger.info(f"Routing from supervisor to: {next_agent}")
         return next_agent
-    
+
     workflow.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
@@ -244,16 +245,16 @@ def create_workflow() -> StateGraph:
             "END": END  # In case of critical failure
         }
     )
-    
+
     # Route specialized agents back to supervisor for progress check
     workflow.add_edge("calendar_agent", "supervisor")
     workflow.add_edge("rag_agent", "supervisor")
     workflow.add_edge("crm_agent", "supervisor")
-    
+
     # Continue with adaptive_writer flow
     workflow.add_edge("adaptive_writer", "human_review")
     workflow.add_edge("human_review", "router")
-    
+
     # Router conditional edges
     workflow.add_conditional_edges(
         "router",
@@ -264,7 +265,7 @@ def create_workflow() -> StateGraph:
             "END": END
         }
     )
-    
+
     # send_email always ends the workflow
     workflow.add_edge("send_email", END)
 

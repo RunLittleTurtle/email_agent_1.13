@@ -1,11 +1,10 @@
 """
-Calendar Agent using Pipedream MCP Server with proper session management
-Handles calendar operations with Google Calendar via MCP tools
+Calendar Agent using Pipedream MCP Server
+Core business logic for calendar operations with Google Calendar via MCP tools
 """
 
 import json
 import os
-from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -21,9 +20,11 @@ from ..models.state import AgentState, CalendarData
 
 load_dotenv()
 
+
 class CalendarAgent(BaseAgent):
     """
-    Calendar agent using Pipedream MCP server with proper session management.
+    Calendar agent using Pipedream MCP server for Google Calendar operations.
+    Handles availability checking and event creation.
     """
 
     def __init__(self):
@@ -48,182 +49,302 @@ class CalendarAgent(BaseAgent):
             }
         })
 
-        # Direct client usage as per v0.1.0 documentation
         tools = await client.get_tools()
         self.logger.info(f"Loaded {len(tools)} MCP tools: {[t.name for t in tools]}")
         return tools
 
-    @traceable(name="calendar_agent_process", tags=["agent", "calendar", "mcp"])
-    async def process(self, state: AgentState) -> AgentState:
-        """Process calendar requests with proper MCP session management"""
+    @traceable(name="calendar_analyze", tags=["calendar", "analysis"])
+    async def analyze_availability(self, state: AgentState) -> AgentState:
+        """
+        Analyze calendar request and check availability.
+        Does NOT create any events - only checks and reports.
+        """
         try:
             if not state.extracted_context:
                 state.add_error("No extracted context for calendar processing")
                 return state
 
-            self.logger.info("Processing calendar request")
+            self.logger.info("Analyzing calendar request for availability")
 
-            # Extract calendar requirements first
+            # Extract calendar requirements
             requirements = await self._extract_calendar_requirements(state)
 
             if not requirements or not requirements.get("is_meeting_request"):
                 state.add_error("No meeting request found in email")
                 return state
 
-            # Get MCP tools using direct client approach
+            # Get MCP tools
             tools = await self._get_mcp_tools()
-
             if not tools:
                 state.add_error("No MCP tools available")
                 return state
 
-            # Create agent with tools
-            llm = ChatOpenAI(
-                model="gpt-4o",
-                temperature=0.3,
-                api_key=os.getenv("OPENAI_API_KEY")
-            )
-
-            agent = create_react_agent(
-                llm,
-                tools
-            )
-
-            # Format task for agent
-            task = self._format_task(requirements)
-            self.logger.info(f"Executing agent task: {task[:200]}...")
-
-            # Create messages with system message included
-            messages = [
-                SystemMessage(content=self._get_calendar_system_message()),
-                HumanMessage(content=task)
-            ]
-
-            # Execute agent with messages including system message
-            result = await agent.ainvoke({
-                "messages": messages
-            })
-
-            self.logger.info(f"Agent execution completed: {result}")
-
-            # Get the last AI message and add it to output
-            messages_list = result.get("messages", [])
-            if messages_list:
-                last_message = messages_list[-1]
-
-                # Get message content
-                if hasattr(last_message, 'content'):
-                    ai_response = last_message.content
-                else:
-                    ai_response = str(last_message)
-
-                # Initialize output if needed
-                if not hasattr(state, 'output'):
-                    state.output = []
-
-                # Add AI response to output
-                state.output.append({
-                    "agent": "CALENDAR AGENT",
-                    "message": ai_response
-                })
+            # Execute availability check
+            result = await self._check_availability(requirements, tools)
 
             # Parse and store results
             parsed_result = self._parse_agent_result(result, requirements)
 
+            # LOG THE PARSED RESULT FOR DEBUGGING
+            self.logger.info(f"Parsed result - Action: {parsed_result.get('action_taken')}, Status: {parsed_result.get('availability_status')}")
+
+            # Create calendar data
             calendar_data = CalendarData(
                 events_checked=parsed_result.get("events_checked", []),
                 availability_status=parsed_result.get("availability_status", "unknown"),
                 suggested_times=parsed_result.get("suggested_times", []),
-                booked_event=parsed_result.get("booked_event"),
                 action_taken=parsed_result.get("action_taken", ""),
-                attendees_notified=parsed_result.get("attendees_notified", [])
+                meeting_request={
+                    "title": requirements.get("subject", "Meeting"),
+                    "requested_datetime": requirements.get("requested_datetime"),
+                    "duration_minutes": requirements.get("duration_minutes", 60),
+                    "attendees": requirements.get("attendees", []),
+                    "description": requirements.get("description", "")
+                }
             )
-
-            # Add meeting request info for adaptive writer
-            calendar_data.meeting_request = {
-                "title": requirements.get("subject", "Meeting"),
-                "requested_datetime": requirements.get("requested_datetime"),
-                "duration_minutes": requirements.get("duration_minutes", 60),
-                "attendees": requirements.get("attendees", []),
-                "description": requirements.get("description", "")
-            }
 
             state.calendar_data = calendar_data
 
-            # Use the full AI response instead of a summary for downstream agents
-            # The AI response already contains detailed conflict detection reasoning
-            if messages_list and hasattr(messages_list[-1], 'content'):
-                full_ai_response = messages_list[-1].content
-                self._add_message(
-                    state,
-                    f"Calendar Agent: {full_ai_response}",
-                    metadata=parsed_result
-                )
+            # Store booking intent for routing decisions
+            # FIX: Use the parsed availability status correctly
+            if parsed_result.get("availability_status") == "available":
+                state.response_metadata["booking_intent"] = {
+                    "ready_to_book": True,
+                    "requirements": requirements,
+                    "slot_available": True
+                }
+                self.logger.info("✅ Time slot is AVAILABLE - ready for booking approval")
+            elif parsed_result.get("availability_status") == "conflict":
+                state.response_metadata["booking_intent"] = {
+                    "ready_to_book": False,
+                    "requirements": requirements,
+                    "slot_available": False,
+                    "alternatives": parsed_result.get("suggested_times", [])
+                }
+                self.logger.info("❌ CONFLICT detected - alternatives suggested")
             else:
-                # Fallback to summary if no AI content available
-                if parsed_result.get("action_taken") == "conflict_detected":
-                    conflict_message = f"Calendar: CONFLICT DETECTED - Alternative times suggested: {parsed_result.get('suggested_times', [])}"
-                else:
-                    conflict_message = f"Calendar: {parsed_result.get('action_taken', 'processed')}"
+                # Unknown status - treat as not ready to book
+                state.response_metadata["booking_intent"] = {
+                    "ready_to_book": False,
+                    "requirements": requirements,
+                    "slot_available": False
+                }
+                self.logger.info("⚠️ Unknown availability status - not proceeding with booking")
 
-                self._add_message(
-                    state,
-                    conflict_message,
-                    metadata=parsed_result
-                )
+            # Add AI response to state
+            self._add_analysis_to_state(state, result, parsed_result)
 
             return state
 
         except Exception as e:
-            self.logger.error(f"Calendar processing failed: {e}", exc_info=True)
-            state.add_error(f"Calendar error: {str(e)}")
+            self.logger.error(f"Calendar analysis failed: {e}", exc_info=True)
+            state.add_error(f"Calendar analysis error: {str(e)}")
             return state
 
-    def _get_calendar_system_message(self) -> str:
-        """Get system message that ensures MCP tool usage"""
+    @traceable(name="calendar_book", tags=["calendar", "booking"])
+    async def create_event(self, state: AgentState) -> AgentState:
+        """
+        Create calendar event after human approval.
+        This method assumes availability has been confirmed and approved.
+        """
+        try:
+            self.logger.info("Creating calendar event after approval")
+
+            booking_intent = state.response_metadata.get("booking_intent", {})
+            requirements = booking_intent.get("requirements", {})
+
+            if not requirements:
+                state.add_error("No booking requirements found")
+                return state
+
+            # Get MCP tools
+            tools = await self._get_mcp_tools()
+            if not tools:
+                state.add_error("No MCP tools available for booking")
+                return state
+
+            # Execute booking
+            result = await self._book_event(requirements, tools)
+
+            # CRITICAL: Extract and store the AI response IMMEDIATELY
+            messages_list = result.get("messages", [])
+            booking_response = None
+
+            # Find the last AI message with actual content
+            for msg in reversed(messages_list):
+                if hasattr(msg, 'content') and msg.content:
+                    booking_response = msg.content
+                    self.logger.info(f"Found booking response: {booking_response[:200]}")
+                    break
+
+            # Parse booking result
+            parsed_result = self._parse_agent_result(result, requirements)
+
+            # Update calendar data with booking info
+            if state.calendar_data:
+                state.calendar_data.booked_event = parsed_result.get("booked_event")
+                state.calendar_data.action_taken = "meeting_booked"
+                state.calendar_data.attendees_notified = parsed_result.get("attendees_notified", [])
+
+            # CRITICAL: Add the full booking response to output and messages
+            if booking_response:
+                # Add to messages for history
+                self._add_message(
+                    state,
+                    f"Calendar Agent: {booking_response}",
+                    metadata=parsed_result
+                )
+
+                # CRITICAL: Ensure output list exists and add the booking confirmation
+                if not hasattr(state, 'output') or state.output is None:
+                    state.output = []
+
+                # Add the FULL booking response with all details
+                state.output.append({
+                    "agent": "CALENDAR AGENT",
+                    "message": booking_response  # This contains meeting link, attendees, etc.
+                })
+
+                self.logger.info(f"✅ Added booking response to output: {booking_response[:100]}...")
+                self.logger.info(f"Output now has {len(state.output)} entries")
+
+            else:
+                # Fallback if we couldn't extract the response
+                self.logger.warning("Could not extract booking response from result")
+                if parsed_result.get("booked_event"):
+                    fallback_msg = f"Successfully created calendar event: {requirements.get('subject')} at {requirements.get('requested_datetime')}"
+
+                    self._add_message(state, f"Calendar Agent: {fallback_msg}", metadata=parsed_result)
+
+                    if not hasattr(state, 'output') or state.output is None:
+                        state.output = []
+
+                    state.output.append({
+                        "agent": "CALENDAR AGENT",
+                        "message": fallback_msg
+                    })
+                else:
+                    state.add_error("Failed to create calendar event - no confirmation received")
+                    self.logger.error("Failed to create calendar event")
+
+            return state
+
+        except Exception as e:
+            self.logger.error(f"Calendar booking failed: {e}", exc_info=True)
+            state.add_error(f"Booking error: {str(e)}")
+            return state
+
+    async def _check_availability(self, requirements: Dict[str, Any], tools: List) -> Dict:
+        """Check calendar availability without booking"""
+        llm = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0.3,
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+
+        agent = create_react_agent(llm, tools)
+
+        task = self._format_availability_check_task(requirements)
+        messages = [
+            SystemMessage(content=self._get_availability_check_system_message()),
+            HumanMessage(content=task)
+        ]
+
+        result = await agent.ainvoke({"messages": messages})
+        self.logger.info("Availability check completed")
+        return result
+
+    async def _book_event(self, requirements: Dict[str, Any], tools: List) -> Dict:
+        """Book calendar event"""
+        llm = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0.3,
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+
+        agent = create_react_agent(llm, tools)
+
+        task = self._format_booking_task(requirements)
+        messages = [
+            SystemMessage(content=self._get_booking_system_message()),
+            HumanMessage(content=task)
+        ]
+
+        result = await agent.ainvoke({"messages": messages})
+        self.logger.info("Event booking completed")
+        return result
+
+    def _get_availability_check_system_message(self) -> str:
+        """System message for availability checking only"""
         return """You are a calendar assistant with Google Calendar access through MCP tools.
 
-CRITICAL INSTRUCTIONS:
-1. You MUST use the provided MCP tools for ALL calendar operations
-2. NEVER simulate or fake calendar operations
-3. ALWAYS call the appropriate tool function
-4. If a tool fails, report the actual error
+CRITICAL: This is an AVAILABILITY CHECK ONLY. DO NOT create any events.
 
-Available tools allow you to:
-- List calendar events
-- Create new events
-- Check availability
-- Update existing events
+Your job is to:
+1. Use the list-events tool to check the requested time slot
+2. Look for any conflicts with existing events
+3. If conflicts exist, suggest 2-3 alternative times
+4. Report your findings clearly
 
-CONFLICT DETECTION WORKFLOW:
-1. Use list-events tool to check the requested time slot
-2. Examine the response carefully for ANY overlapping events
-3. If conflicts exist, suggest alternative times using the same tool
+IMPORTANT: Only check and report. Never create events during availability checking.
 
-CRITICAL SYNTHESIS REQUIREMENT:
-- You MUST ALWAYS review and synthesize ALL previous tool call results before giving your final response
-- NEVER ignore any tool call results - each tool call provides important information
-- If you made 2 tool calls, your response must reference findings from BOTH tool calls
-- If you made 3 tool calls, your response must reference findings from ALL 3 tool calls
-- Pattern: "I checked [location/time 1] - [result]. I also checked [location/time 2] - [result]. Therefore..."
-- Your final answer MUST demonstrate you considered every single tool call you made
+Timezone: America/New_York"""
 
-CRITICAL: You MUST examine the list events tool response thoroughly. Even if there are existing events close to the requested time, you must check for any time overlap. DO NOT create events if there are ANY conflicts detected in the tool response.
+    def _get_booking_system_message(self) -> str:
+        """System message for direct booking"""
+        return """You are a calendar assistant with Google Calendar access through MCP tools.
 
-For meeting requests:
-1. Always check availability first with list events tool
-2. Parse tool response carefully for conflicts
-3. If ANY conflict exists → suggest alternatives (do not book)
-4. If completely clear → create event
-5. Always report actual tool results
-6. SYNTHESIZE all tool call results in your final response
+This is a BOOKING task. Availability has been confirmed and approved.
 
-Example of proper synthesis:
-"I checked Tuesday August 19th at 2 PM - this slot is available. I also checked Wednesday August 20th but found a conflict with an existing meeting from 10:30 AM to 2:30 PM. Therefore, I can offer Tuesday August 19th at 2 PM, or alternative times on different days."
+Your job is to:
+1. Use the create-event tool to book the meeting immediately
+2. Include all attendees and details provided
+3. Confirm successful creation
+4. Return the event details and meeting link if available
 
-Timezone: America/New_York
+Proceed directly to booking.
 
-Remember: You must use tools, not just describe what you would do. Always synthesize ALL tool call results."""
+Timezone: America/New_York"""
+
+    def _format_availability_check_task(self, requirements: Dict[str, Any]) -> str:
+        """Format task for availability check only"""
+        requested_datetime = requirements.get("requested_datetime")
+        duration = requirements.get("duration_minutes", 60)
+
+        if requested_datetime:
+            try:
+                dt = datetime.fromisoformat(requested_datetime)
+                formatted_time = dt.strftime("%A, %B %d, %Y at %I:%M %p")
+            except ValueError:
+                formatted_time = requested_datetime
+
+            return f"""CHECK AVAILABILITY (DO NOT BOOK):
+
+Requested Time: {formatted_time}
+Duration: {duration} minutes
+
+Instructions:
+1. Use list-events tool to check for conflicts at this time
+2. If there's a conflict, find 2-3 alternative available slots
+3. Report what you found
+
+Remember: This is only checking - do not create any events."""
+
+        return "Check calendar availability for the requested meeting time"
+
+    def _format_booking_task(self, requirements: Dict[str, Any]) -> str:
+        """Format task for direct booking"""
+        return f"""CREATE CALENDAR EVENT NOW:
+
+Event Details:
+- Title: {requirements.get('subject', 'Meeting')}
+- DateTime: {requirements.get('requested_datetime')}
+- Duration: {requirements.get('duration_minutes', 60)} minutes
+- Attendees: {', '.join(requirements.get('attendees', []))}
+- Description: {requirements.get('description', '')}
+
+Use the create-event tool to book this meeting immediately.
+Include the meeting link in your response."""
 
     async def _extract_calendar_requirements(self, state: AgentState) -> Optional[Dict[str, Any]]:
         """Extract calendar requirements from email"""
@@ -231,7 +352,6 @@ Remember: You must use tools, not just describe what you would do. Always synthe
         if not email:
             return None
 
-        # Get current date/time for context
         current_date = datetime.now()
         current_year = current_date.year
         current_date_str = current_date.strftime("%Y-%m-%d")
@@ -242,13 +362,12 @@ SUBJECT: {email.subject}
 FROM: {email.sender}
 BODY: {email.body}
 
-IMPORTANT: Current date is {current_date_str} and current year is {current_year}.
-When parsing dates, always use the current year ({current_year}) unless explicitly specified otherwise.
+Current date: {current_date_str} (year {current_year})
 
 Return JSON:
 {{
     "is_meeting_request": true/false,
-    "requested_datetime": "{current_year}-08-19T13:00:00-04:00",
+    "requested_datetime": "ISO format with timezone",
     "duration_minutes": 60,
     "attendees": ["email@example.com"],
     "subject": "Meeting title",
@@ -267,7 +386,7 @@ Return JSON:
                     attendees.append(sender_email)
                 requirements["attendees"] = attendees
 
-            # Validate and correct the datetime to ensure current year
+            # Validate datetime
             if requirements.get("requested_datetime"):
                 requirements["requested_datetime"] = self._validate_and_correct_datetime(
                     requirements["requested_datetime"],
@@ -281,128 +400,90 @@ Return JSON:
             return None
 
     def _validate_and_correct_datetime(self, datetime_str: str, current_year: int) -> str:
-        """Validate and correct datetime to use current year if needed, with timezone"""
+        """Validate and correct datetime to use current year if needed"""
         try:
             from zoneinfo import ZoneInfo
 
-            # Parse the datetime string
             dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
 
-            # If year is not current year, update it
             if dt.year != current_year:
                 dt = dt.replace(year=current_year)
-                self.logger.info(f"Corrected year from {datetime_str} to {dt.isoformat()}")
+                self.logger.info(f"Corrected year to {current_year}")
 
-            # Ensure timezone is set - default to America/Toronto if naive
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("America/Toronto"))
-                self.logger.info(f"Added timezone America/Toronto to datetime: {dt.isoformat()}")
 
             return dt.isoformat()
         except Exception as e:
-            self.logger.error(f"Error validating datetime {datetime_str}: {e}")
-            # Fallback: add timezone to original string if it doesn't have one
+            self.logger.error(f"Error validating datetime: {e}")
             if 'T' in datetime_str and '+' not in datetime_str and 'Z' not in datetime_str:
-                return datetime_str + "-04:00"  # EDT timezone offset
+                return datetime_str + "-04:00"
             return datetime_str
 
-    def _format_task(self, requirements: Dict[str, Any]) -> str:
-        """Format calendar requirements into task"""
-        requested_datetime = requirements.get("requested_datetime")
-        attendees = requirements.get("attendees", [])
-        subject = requirements.get("subject", "Meeting")
-        duration = requirements.get("duration_minutes", 60)
-        description = requirements.get("description", "")
-
-        if requested_datetime:
-            try:
-                dt = datetime.fromisoformat(requested_datetime)
-                formatted_time = dt.strftime("%A, %B %d, %Y at %I:%M %p")
-
-                # Add current context for better understanding
-                current_time = datetime.now()
-                current_time_str = current_time.strftime("%A, %B %d, %Y at %I:%M %p")
-
-            except ValueError:
-                formatted_time = requested_datetime
-                current_time_str = "current time unavailable"
-
-            return f"""USE YOUR CALENDAR TOOLS to schedule this meeting:
-- Title: {subject}
-- Date/Time: {formatted_time}
-- Duration: {duration} minutes
-- Attendees: {', '.join(attendees)}
-- Description: {description}
-- Timezone: America/Toronto (EDT/EST)
-
-CONTEXT: Current time is {current_time_str}. The meeting should be scheduled for the correct year ({datetime.now().year}).
-
-IMPORTANT TIMEZONE REQUIREMENT: When creating events, use the exact datetime from this request: {requested_datetime}
-This datetime already includes proper timezone information. Do NOT modify the datetime format.
-
-WORKFLOW:
-1. First, check availability for {formatted_time} using list events tool
-2. If there's a conflict with existing events:
-   - Find 2 alternative available time slots (prefer same day if possible, otherwise next business days)
-   - Return: "CONFLICT_DETECTED: Alternative times: [time1, time2]"
-   - Do NOT create the event
-3. If no conflict exists:
-   - Create the event using create event tool with the exact datetime: {requested_datetime}
-   - Confirm successful creation
-   - Add the link of the invitation in the OUTPUT
-
-IMPORTANT: Always check for conflicts before creating events. Use timezone-aware datetime strings."""
-        else:
-            return f"""Find available times for:
-- Title: {subject}
-- Duration: {duration} minutes
-- Attendees: {', '.join(attendees)}
-
-Suggest 3 business day options."""
-
     def _parse_agent_result(self, result: Dict[str, Any], requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse agent result into structured format with conflict detection"""
-
-        # Get the last message content
+        """Parse agent result into structured format"""
         messages = result.get("messages", [])
         if not messages:
             return {"action_taken": "no_response", "availability_status": "unknown"}
 
         last_message = messages[-1]
-
-        # Log the actual message for debugging
-        self.logger.info(f"Last message type: {type(last_message)}")
-        self.logger.info(f"Last message content: {last_message}")
-
         output = last_message.content if hasattr(last_message, 'content') else str(last_message)
         output_lower = output.lower()
 
-        # Check for tool calls in the message
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            self.logger.info(f"Tool calls detected: {last_message.tool_calls}")
+        self.logger.info(f"Parsing agent output: {output[:200]}")
 
-        # Priority 1: Check for conflict detection with alternatives
-        if "conflict_detected" in output_lower:
+        # IMPORTANT: Check for POSITIVE availability FIRST
+        # Look for explicit statements that slot is available
+        if any(phrase in output_lower for phrase in [
+            "available",
+            "no conflicts",
+            "no conflict",
+            "free",
+            "can schedule",
+            "can book",
+            "slot is open",
+            "time is available",
+            "proceed with booking"
+        ]):
+            # Double-check it's not saying "NOT available"
+            if "not available" not in output_lower and "unavailable" not in output_lower:
+                self.logger.info("✅ Detected: Slot is AVAILABLE")
+                return {
+                    "action_taken": "availability_confirmed",
+                    "availability_status": "available",
+                    "suggested_times": []
+                }
+
+        # Check for actual conflicts (but only if not already marked as available)
+        if any(phrase in output_lower for phrase in [
+            "conflict detected",
+            "already booked",
+            "already scheduled",
+            "busy",
+            "not available",
+            "unavailable",
+            "overlapping",
+            "clash"
+        ]):
+            self.logger.info("❌ Detected: CONFLICT found")
             suggested_times = self._extract_alternative_times(output)
             return {
                 "action_taken": "conflict_detected",
                 "availability_status": "conflict",
                 "suggested_times": suggested_times,
-                "message": output,  # Include full AI response with conflict details
+                "message": output,
                 "full_response": output
             }
 
-        # Priority 2: Check for successful event creation
+        # Check for successful event creation (shouldn't happen in analysis phase)
         if "created" in output_lower or "scheduled" in output_lower or "successfully" in output_lower:
-            # Extract meeting link if available
+            self.logger.info("📅 Detected: Event CREATED")
             meeting_link = self._extract_meeting_link(output)
-
             booked_event = {
                 "summary": requirements.get("subject", "Meeting"),
                 "datetime": requirements.get("requested_datetime"),
                 "attendees": requirements.get("attendees", [])
             }
-
             if meeting_link:
                 booked_event["meeting_link"] = meeting_link
 
@@ -413,57 +494,26 @@ Suggest 3 business day options."""
                 "attendees_notified": requirements.get("attendees", [])
             }
 
-        # Priority 3: Check for general conflicts without alternatives
-        elif "conflict" in output_lower or "not available" in output_lower or "busy" in output_lower:
-            return {
-                "action_taken": "alternatives_needed",
-                "availability_status": "conflict",
-                "suggested_times": [],
-                "message": output,  # Include full AI response with conflict details
-                "full_response": output
-            }
-
-        # Priority 4: Check for availability confirmation
-        elif "available" in output_lower and "no conflict" in output_lower:
-            return {
-                "action_taken": "availability_confirmed",
-                "availability_status": "available",
-                "suggested_times": []
-            }
-
-        # Priority 5: Check for tool usage
-        elif hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            return {
-                "action_taken": "tools_called",
-                "availability_status": "processing",
-                "tool_calls": [tc.get('name') for tc in last_message.tool_calls] if hasattr(last_message, 'tool_calls') else []
-            }
-
-        # Default: General processing
-        else:
-            return {
-                "action_taken": "processed",
-                "availability_status": "unknown",
-                "message": output[:200]
-            }
+        # Default: If we can't determine, assume it needs more processing
+        return {
+            "action_taken": "processed",
+            "availability_status": "unknown",
+            "message": output[:200]
+        }
 
     def _extract_alternative_times(self, output: str) -> List[Dict[str, Any]]:
-        """Extract alternative time slots from agent output and return as dictionaries"""
+        """Extract alternative time slots from output"""
         import re
 
-        # Look for the specific format: "Alternative times: [time1, time2]"
         pattern = r"Alternative times?\s*:\s*\[(.*?)\]"
         match = re.search(pattern, output, re.IGNORECASE)
 
         if match:
             times_str = match.group(1)
-            # Split by comma and clean up
             times = [time.strip().strip('"\'') for time in times_str.split(',')]
-            self.logger.info(f"Extracted alternative times: {times}")
-            # Convert to dict format
             return [{"time_slot": time, "status": "suggested"} for time in times if time]
 
-        # Fallback: look for time patterns in the output
+        # Fallback patterns
         time_patterns = [
             r'\d{1,2}:\d{2}\s*(?:AM|PM)',
             r'\d{1,2}\s*(?:AM|PM)',
@@ -475,32 +525,24 @@ Suggest 3 business day options."""
             matches = re.findall(pattern, output, re.IGNORECASE)
             suggested_times.extend(matches)
 
-        # Remove duplicates and limit to 2
-        unique_times = list(dict.fromkeys(suggested_times))[:2]
-        self.logger.info(f"Fallback extracted times: {unique_times}")
-        # Convert to dict format
+        unique_times = list(dict.fromkeys(suggested_times))[:3]
         return [{"time_slot": time, "status": "suggested"} for time in unique_times if time]
 
     def _extract_meeting_link(self, output: str) -> Optional[str]:
-        """Extract meeting link from agent output"""
+        """Extract meeting link from output"""
         import re
 
-        # Look for various meeting link patterns
         link_patterns = [
             r'https://meet\.google\.com/[a-z0-9-]+',
             r'https://zoom\.us/j/\d+',
             r'https://teams\.microsoft\.com/[^\s]+',
-            r'https://[^\s]*meet[^\s]*',
-            r'Meeting link:\s*(https?://[^\s]+)',
-            r'Join at:\s*(https?://[^\s]+)',
-            r'Link:\s*(https?://[^\s]+)'
+            r'Meeting link:\s*(https?://[^\s]+)'
         ]
 
         for pattern in link_patterns:
             match = re.search(pattern, output, re.IGNORECASE)
             if match:
                 link = match.group(1) if match.groups() else match.group(0)
-                self.logger.info(f"Extracted meeting link: {link}")
                 return link
 
         return None
@@ -518,3 +560,27 @@ Suggest 3 business day options."""
             return sender.strip()
 
         return None
+
+    def _add_analysis_to_state(self, state: AgentState, result: Dict, parsed_result: Dict):
+        """Add analysis results to state messages and output"""
+        messages_list = result.get("messages", [])
+        if messages_list and hasattr(messages_list[-1], 'content'):
+            full_ai_response = messages_list[-1].content
+            self._add_message(
+                state,
+                f"Calendar Agent: {full_ai_response}",
+                metadata=parsed_result
+            )
+
+            if not hasattr(state, 'output'):
+                state.output = []
+            state.output.append({
+                "agent": "CALENDAR AGENT",
+                "message": full_ai_response
+            })
+
+    # Backward compatibility method
+    @traceable(name="calendar_agent_process", tags=["agent", "calendar"])
+    async def process(self, state: AgentState) -> AgentState:
+        """Legacy method for backward compatibility - redirects to analyze_availability"""
+        return await self.analyze_availability(state)

@@ -184,7 +184,8 @@ Generate a professional email response that:
 5. Includes a proper greeting and closing{' and addresses all human feedback' if is_refinement else ''}
 6. Incorporates relevant information from calendar, documents, and contacts as needed
 7. Use the complete OUTPUT of the specialized agents like the calendar agent, document agent, and contact agent
-8. If some information is missing due to agent failures, acknowledge this appropriately
+8. Always format the draft email so it is easy to read and nice to the eye
+9. If some information is missing due to agent failures, acknowledge this appropriately
 
 Return the response in JSON format:
 {{
