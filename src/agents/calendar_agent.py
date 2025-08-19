@@ -432,38 +432,22 @@ Return JSON:
 
         self.logger.info(f"Parsing agent output: {output[:200]}")
 
-        # IMPORTANT: Check for POSITIVE availability FIRST
-        # Look for explicit statements that slot is available
+        # CRITICAL FIX: Check for CONFLICTS FIRST before availability
+        # This prevents false positives when both conflict and availability language exist
         if any(phrase in output_lower for phrase in [
-            "available",
-            "no conflicts",
-            "no conflict",
-            "free",
-            "can schedule",
-            "can book",
-            "slot is open",
-            "time is available",
-            "proceed with booking"
-        ]):
-            # Double-check it's not saying "NOT available"
-            if "not available" not in output_lower and "unavailable" not in output_lower:
-                self.logger.info("✅ Detected: Slot is AVAILABLE")
-                return {
-                    "action_taken": "availability_confirmed",
-                    "availability_status": "available",
-                    "suggested_times": []
-                }
-
-        # Check for actual conflicts (but only if not already marked as available)
-        if any(phrase in output_lower for phrase in [
-            "conflict detected",
+            "conflict",
+            "conflicts",
             "already booked",
-            "already scheduled",
+            "already scheduled", 
             "busy",
             "not available",
             "unavailable",
             "overlapping",
-            "clash"
+            "overlap",
+            "clash",
+            "occupied",
+            "reserved",
+            "event scheduled"
         ]):
             self.logger.info("❌ Detected: CONFLICT found")
             suggested_times = self._extract_alternative_times(output)
@@ -473,6 +457,42 @@ Return JSON:
                 "suggested_times": suggested_times,
                 "message": output,
                 "full_response": output
+            }
+
+        # ONLY after confirming NO conflicts, check for availability 
+        # Look for explicit statements that slot is available AND no conflicts mentioned
+        if any(phrase in output_lower for phrase in [
+            "available",
+            "no conflicts",
+            "no conflict", 
+            "can schedule",
+            "can book",
+            "slot is open",
+            "time is available",
+            "proceed with booking"
+        ]):
+            # Extra safety: ensure "free" isn't used in context of partial availability
+            if "free" in output_lower:
+                # Check if "free" is mentioned in context of conflicts
+                free_context_conflict_phrases = [
+                    "remaining", "after", "minutes", "partial", "only", "just"
+                ]
+                if any(ctx in output_lower for ctx in free_context_conflict_phrases):
+                    self.logger.info("⚠️ 'Free' mentioned in conflict context - treating as conflict")
+                    suggested_times = self._extract_alternative_times(output)
+                    return {
+                        "action_taken": "conflict_detected", 
+                        "availability_status": "conflict",
+                        "suggested_times": suggested_times,
+                        "message": output,
+                        "full_response": output
+                    }
+            
+            self.logger.info("✅ Detected: Slot is AVAILABLE (no conflicts found)")
+            return {
+                "action_taken": "availability_confirmed",
+                "availability_status": "available", 
+                "suggested_times": []
             }
 
         # Check for successful event creation (shouldn't happen in analysis phase)
