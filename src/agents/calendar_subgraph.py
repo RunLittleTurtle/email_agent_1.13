@@ -3,8 +3,12 @@ Calendar Subgraph
 Orchestrates the calendar workflow with human approval for bookings
 """
 
+import os
+import json
 from langgraph.graph import StateGraph, END
 from langsmith import traceable
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 import structlog
 
 from ..models.state import AgentState
@@ -73,38 +77,109 @@ def create_calendar_subgraph() -> StateGraph:
     return compiled
 
 
-@traceable(name="route_after_analysis", tags=["calendar", "routing"])
-def route_after_analysis(state: AgentState) -> str:
+async def _llm_router_decision(ai_response: str, original_request: str) -> str:
     """
-    Determine next step after calendar analysis.
+    Use GPT-4o to determine routing based on AI response context.
+    More reliable than keyword matching.
+    
+    Returns:
+        - "review": Route to human booking approval 
+        - "exit": Route back to supervisor
+    """
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        temperature=0.1,
+        api_key=os.getenv("OPENAI_API_KEY")
+    )
+    
+    system_prompt = """You are a routing decision maker for a calendar agent workflow.
+
+Your job: Analyze the AI's calendar response and decide the next routing step.
+
+ROUTING OPTIONS:
+1. "review" - Route to human booking approval (when slot is AVAILABLE and ready to book)
+2. "exit" - Route back to supervisor (when there are CONFLICTS or it's not a booking request)
+
+DECISION CRITERIA:
+- If the AI found the requested time slot is AVAILABLE with NO conflicts → "review"  
+- If the AI found CONFLICTS or scheduling issues → "exit"
+- If the AI suggests alternative times due to conflicts → "exit"
+- If it's not a meeting/booking request → "exit"
+
+Respond with ONLY the routing decision: "review" or "exit"."""
+
+    human_prompt = f"""ORIGINAL REQUEST: {original_request}
+
+AI CALENDAR RESPONSE: {ai_response}
+
+Based on the AI's response, what should be the next routing step?
+Respond with ONLY: "review" or "exit\""""
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ])
+        
+        decision = response.content.strip().lower()
+        if decision not in ["review", "exit"]:
+            logger.warning(f"Invalid LLM router decision: {decision}, defaulting to exit")
+            return "exit"
+            
+        return decision
+        
+    except Exception as e:
+        logger.error(f"LLM router failed: {e}, defaulting to exit")
+        return "exit"
+
+
+@traceable(name="route_after_analysis", tags=["calendar", "routing"])
+async def route_after_analysis(state: AgentState) -> str:
+    """
+    Determine next step after calendar analysis using LLM-based routing.
+    Much more reliable than keyword matching.
 
     Returns:
         - "review": If a booking is ready and needs approval (NO CONFLICT)
         - "exit": If there's a conflict or not a meeting request (goes back to supervisor)
     """
-    booking_intent = state.response_metadata.get("booking_intent", {})
+    # Get the AI response from calendar analysis
+    ai_response = ""
+    if state.output and len(state.output) > 0:
+        # Get the last calendar agent response
+        for output_entry in reversed(state.output):
+            if output_entry.get("agent") == "CALENDAR AGENT":
+                ai_response = output_entry.get("message", "")
+                break
     
-    # Enhanced debug logging for routing decisions
-    logger.info(f"🔀 ROUTING DECISION - booking_intent: {booking_intent}")
+    if not ai_response:
+        logger.warning("No AI response found for routing decision, defaulting to exit")
+        return "exit"
     
-    ready_to_book = booking_intent.get("ready_to_book", False)
-    slot_available = booking_intent.get("slot_available", True)
+    # Get original email context
+    original_request = ""
+    if state.email:
+        original_request = f"Subject: {state.email.subject}\nBody: {state.email.body}"
     
-    logger.info(f"🔍 ready_to_book: {ready_to_book}, slot_available: {slot_available}")
-
-    # Check if slot is available and ready to book
-    if ready_to_book and slot_available:
-        logger.info("✅ ROUTING → human_booking_review (slot available, ready to book)")
+    logger.info(f"🤖 LLM ROUTER - Analyzing AI response: {ai_response[:100]}...")
+    
+    # Use LLM to make routing decision
+    decision = await _llm_router_decision(ai_response, original_request)
+    
+    if decision == "review":
+        logger.info("✅ LLM ROUTER → human_booking_review (slot available for booking)")
+        # Ensure booking intent is set for downstream nodes
+        if "booking_intent" not in state.response_metadata:
+            state.response_metadata["booking_intent"] = {
+                "ready_to_book": True,
+                "slot_available": True,
+                "requirements": {}  # Will be extracted by booking node if needed
+            }
         return "review"
     else:
-        # Exit cases (will go back to supervisor)
-        if slot_available is False:
-            logger.info("⚠️ ROUTING → supervisor (conflict detected, alternatives provided)")
-            # Ensure the supervisor knows about the conflict
-            state.response_metadata["calendar_conflict"] = True
-            state.response_metadata["calendar_alternatives"] = booking_intent.get("alternatives", [])
-        else:
-            logger.info(f"ℹ️ ROUTING → supervisor (not ready to book: ready_to_book={ready_to_book}, slot_available={slot_available})")
+        logger.info("⚠️ LLM ROUTER → supervisor (conflicts or not a booking request)")
+        # Mark potential conflict for supervisor awareness
+        state.response_metadata["calendar_analyzed"] = True
         return "exit"
 
 
