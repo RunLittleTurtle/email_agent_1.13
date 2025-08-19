@@ -83,20 +83,28 @@ def route_after_analysis(state: AgentState) -> str:
         - "exit": If there's a conflict or not a meeting request (goes back to supervisor)
     """
     booking_intent = state.response_metadata.get("booking_intent", {})
+    
+    # Enhanced debug logging for routing decisions
+    logger.info(f"🔀 ROUTING DECISION - booking_intent: {booking_intent}")
+    
+    ready_to_book = booking_intent.get("ready_to_book", False)
+    slot_available = booking_intent.get("slot_available", True)
+    
+    logger.info(f"🔍 ready_to_book: {ready_to_book}, slot_available: {slot_available}")
 
     # Check if slot is available and ready to book
-    if booking_intent.get("ready_to_book", False) and booking_intent.get("slot_available", True):
-        logger.info("✅ No conflict detected - routing directly to human review for booking approval")
+    if ready_to_book and slot_available:
+        logger.info("✅ ROUTING → human_booking_review (slot available, ready to book)")
         return "review"
     else:
         # Exit cases (will go back to supervisor)
-        if booking_intent.get("slot_available") is False:
-            logger.info("⚠️ Conflict detected - exiting to supervisor with alternatives")
+        if slot_available is False:
+            logger.info("⚠️ ROUTING → supervisor (conflict detected, alternatives provided)")
             # Ensure the supervisor knows about the conflict
             state.response_metadata["calendar_conflict"] = True
             state.response_metadata["calendar_alternatives"] = booking_intent.get("alternatives", [])
         else:
-            logger.info("ℹ️ Not a booking request - exiting to supervisor")
+            logger.info(f"ℹ️ ROUTING → supervisor (not ready to book: ready_to_book={ready_to_book}, slot_available={slot_available})")
         return "exit"
 
 

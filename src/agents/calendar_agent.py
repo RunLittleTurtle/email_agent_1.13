@@ -469,7 +469,15 @@ Return JSON:
             "can book",
             "slot is open",
             "time is available",
-            "proceed with booking"
+            "proceed with booking",
+            "proceed to schedule", 
+            "proceed to book",
+            "you can schedule",
+            "go ahead and schedule",
+            "ready to schedule",
+            "schedule your event",
+            "book your event",
+            "create the event"
         ]):
             # Extra safety: ensure "free" isn't used in context of partial availability
             if "free" in output_lower:
