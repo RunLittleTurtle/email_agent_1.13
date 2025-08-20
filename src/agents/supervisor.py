@@ -107,6 +107,8 @@ Analyze ALL aspects and determine:
 1. What specialized agents are needed (before adaptive_writer)?
 2. What is the optimal execution order?
 3. What specific task should each agent perform?
+4. IMPORTANT:Be very specific about the task each agent should perform.
+5. If it's a booking and a date, be very SPECIFIC and CLEARLY state the booking details.
 
 Return JSON:
 {{

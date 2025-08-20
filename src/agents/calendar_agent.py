@@ -105,31 +105,22 @@ class CalendarAgent(BaseAgent):
 
             state.calendar_data = calendar_data
 
-            # Store booking intent for routing decisions
-            # FIX: Use the parsed availability status correctly
-            if parsed_result.get("availability_status") == "available":
-                state.response_metadata["booking_intent"] = {
-                    "ready_to_book": True,
-                    "requirements": requirements,
-                    "slot_available": True
-                }
-                self.logger.info("✅ Time slot is AVAILABLE - ready for booking approval")
-            elif parsed_result.get("availability_status") == "conflict":
-                state.response_metadata["booking_intent"] = {
-                    "ready_to_book": False,
-                    "requirements": requirements,
-                    "slot_available": False,
-                    "alternatives": parsed_result.get("suggested_times", [])
-                }
-                self.logger.info("❌ CONFLICT detected - alternatives suggested")
-            else:
-                # Unknown status - treat as not ready to book
-                state.response_metadata["booking_intent"] = {
-                    "ready_to_book": False,
-                    "requirements": requirements,
-                    "slot_available": False
-                }
-                self.logger.info("⚠️ Unknown availability status - not proceeding with booking")
+            # Determine if this is ready to book based on analysis
+            is_available = parsed_result.get("availability_status") not in ["conflict", "unknown"]
+            has_alternatives = len(parsed_result.get("suggested_times", [])) > 0
+            is_meeting_request = requirements.get("is_meeting_request", False)
+            
+            # Set booking intent flags for LLM router
+            state.response_metadata["booking_intent"] = {
+                "requirements": requirements,
+                "ready_to_book": is_available and is_meeting_request and not has_alternatives,
+                "slot_available": is_available,
+                "alternatives_suggested": has_alternatives,
+                "analysis_complete": True
+            }
+            
+            self.logger.info(f"Calendar analysis complete - ready_to_book: {state.response_metadata['booking_intent']['ready_to_book']}, slot_available: {is_available}")
+            self.logger.info("LLM router will make final routing decision")
 
             # Add AI response to state
             self._add_analysis_to_state(state, result, parsed_result)
@@ -283,7 +274,7 @@ CRITICAL: This is an AVAILABILITY CHECK ONLY. DO NOT create any events.
 Your job is to:
 1. Use the list-events tool to check the requested time slot
 2. Look for any conflicts with existing events
-3. If conflicts exist, suggest 2-3 alternative times
+3. If conflicts exist, suggest 2-3 alternative times and days
 4. Report your findings clearly
 
 IMPORTANT: Only check and report. Never create events during availability checking.
@@ -309,7 +300,7 @@ Timezone: America/New_York"""
     def _format_availability_check_task(self, requirements: Dict[str, Any]) -> str:
         """Format task for availability check only"""
         requested_datetime = requirements.get("requested_datetime")
-        duration = requirements.get("duration_minutes", 60)
+        duration = requirements.get("duration_minutes", 30)
 
         if requested_datetime:
             try:
@@ -326,7 +317,9 @@ Duration: {duration} minutes
 Instructions:
 1. Use list-events tool to check for conflicts at this time
 2. If there's a conflict, find 2-3 alternative available slots
-3. Report what you found
+3. At least one of the alternatives slots MUST be another day
+4. For the time slots, you must respect the working hours, between 9h00 and 17h00
+5. Report what you found
 
 Remember: This is only checking - do not create any events."""
 
@@ -339,7 +332,7 @@ Remember: This is only checking - do not create any events."""
 Event Details:
 - Title: {requirements.get('subject', 'Meeting')}
 - DateTime: {requirements.get('requested_datetime')}
-- Duration: {requirements.get('duration_minutes', 60)} minutes
+- Duration: {requirements.get('duration_minutes', 30)} minutes
 - Attendees: {', '.join(requirements.get('attendees', []))}
 - Description: {requirements.get('description', '')}
 
@@ -368,7 +361,7 @@ Return JSON:
 {{
     "is_meeting_request": true/false,
     "requested_datetime": "ISO format with timezone",
-    "duration_minutes": 60,
+    "duration_minutes": 30,
     "attendees": ["email@example.com"],
     "subject": "Meeting title",
     "description": "Meeting description"
@@ -421,89 +414,20 @@ Return JSON:
             return datetime_str
 
     def _parse_agent_result(self, result: Dict[str, Any], requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse agent result into structured format"""
+        """Parse agent result into structured format - let LLM router handle routing logic"""
         messages = result.get("messages", [])
         if not messages:
             return {"action_taken": "no_response", "availability_status": "unknown"}
 
         last_message = messages[-1]
         output = last_message.content if hasattr(last_message, 'content') else str(last_message)
-        output_lower = output.lower()
 
         self.logger.info(f"Parsing agent output: {output[:200]}")
 
-        # CRITICAL FIX: Check for CONFLICTS FIRST before availability
-        # This prevents false positives when both conflict and availability language exist
-        if any(phrase in output_lower for phrase in [
-            "conflict",
-            "conflicts",
-            "already booked",
-            "already scheduled", 
-            "busy",
-            "not available",
-            "unavailable",
-            "overlapping",
-            "overlap",
-            "clash",
-            "occupied",
-            "reserved",
-            "event scheduled"
-        ]):
-            self.logger.info("❌ Detected: CONFLICT found")
-            suggested_times = self._extract_alternative_times(output)
-            return {
-                "action_taken": "conflict_detected",
-                "availability_status": "conflict",
-                "suggested_times": suggested_times,
-                "message": output,
-                "full_response": output
-            }
+        # Just extract basic info, let LLM router make routing decisions
+        output_lower = output.lower()
 
-        # ONLY after confirming NO conflicts, check for availability 
-        # Look for explicit statements that slot is available AND no conflicts mentioned
-        if any(phrase in output_lower for phrase in [
-            "available",
-            "no conflicts",
-            "no conflict", 
-            "can schedule",
-            "can book",
-            "slot is open",
-            "time is available",
-            "proceed with booking",
-            "proceed to schedule", 
-            "proceed to book",
-            "you can schedule",
-            "go ahead and schedule",
-            "ready to schedule",
-            "schedule your event",
-            "book your event",
-            "create the event"
-        ]):
-            # Extra safety: ensure "free" isn't used in context of partial availability
-            if "free" in output_lower:
-                # Check if "free" is mentioned in context of conflicts
-                free_context_conflict_phrases = [
-                    "remaining", "after", "minutes", "partial", "only", "just"
-                ]
-                if any(ctx in output_lower for ctx in free_context_conflict_phrases):
-                    self.logger.info("⚠️ 'Free' mentioned in conflict context - treating as conflict")
-                    suggested_times = self._extract_alternative_times(output)
-                    return {
-                        "action_taken": "conflict_detected", 
-                        "availability_status": "conflict",
-                        "suggested_times": suggested_times,
-                        "message": output,
-                        "full_response": output
-                    }
-            
-            self.logger.info("✅ Detected: Slot is AVAILABLE (no conflicts found)")
-            return {
-                "action_taken": "availability_confirmed",
-                "availability_status": "available", 
-                "suggested_times": []
-            }
-
-        # Check for successful event creation (shouldn't happen in analysis phase)
+        # Check for successful event creation (for booking phase)
         if "created" in output_lower or "scheduled" in output_lower or "successfully" in output_lower:
             self.logger.info("📅 Detected: Event CREATED")
             meeting_link = self._extract_meeting_link(output)
@@ -517,16 +441,22 @@ Return JSON:
 
             return {
                 "action_taken": "meeting_booked",
-                "availability_status": "available",
+                "availability_status": "booked",
                 "booked_event": booked_event,
-                "attendees_notified": requirements.get("attendees", [])
+                "attendees_notified": requirements.get("attendees", []),
+                "message": output,
+                "full_response": output
             }
 
-        # Default: If we can't determine, assume it needs more processing
+        # For analysis phase, just return raw info
+        suggested_times = self._extract_alternative_times(output)
+
         return {
-            "action_taken": "processed",
-            "availability_status": "unknown",
-            "message": output[:200]
+            "action_taken": "analyzed",
+            "availability_status": "pending_routing",  # Let LLM router decide
+            "suggested_times": suggested_times,
+            "message": output,
+            "full_response": output
         }
 
     def _extract_alternative_times(self, output: str) -> List[Dict[str, Any]]:

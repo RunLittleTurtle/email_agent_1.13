@@ -48,6 +48,7 @@ class EmailProcessorAgent(BaseAgent):
             # System prompt for parsing + context extraction
             system_prompt = """You are an email parsing and context extraction assistant.
             Extract and structure key information from emails, including entities, actions, and urgency.
+            IMPORTANT:Be very clear when you formulate your response, since the supervisor and the rest of the graph will use your ouput.
             Always respond in valid JSON format.
             For dates, use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)."""
 
@@ -64,11 +65,14 @@ Return JSON with two sections:
     "parsing": {{
         "summary": "Brief summary of the email",
         "main_request": "What is being asked or communicated",
+        "additional_info": "Any additional information or context",
         "has_attachments": true/false,
         "requires_response": true/false,
         "urgency_indicators": ["list of urgency indicators if any"],
         "key_points": ["list of main points"],
-        "questions_asked": ["list of specific questions if any"]
+        "questions_asked": ["list of specific questions if any"],
+        "past_emails_summary": ["list of summaries of past emails"]
+
     }},
     "context": {{
         "key_entities": ["list of people, companies, projects mentioned"],
