@@ -142,7 +142,8 @@ class AdaptiveWriterAgent(BaseAgent):
             Generate appropriate, contextual email responses.
             Match the tone and formality of the original email.
             Be concise but complete.
-            Always maintain a professional and helpful tone."""
+            Always maintain a professional and helpful tone.
+            Important: Do not include any subjectinformation of already scheduled events in the response. Only tell the time unavailable, but DO NOT say why."""
 
             # Build feedback context for refinement iterations
             feedback_prompt_section = ""

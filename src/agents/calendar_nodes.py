@@ -71,18 +71,18 @@ async def human_booking_review_node(state: AgentState) -> AgentState:
         short_time = "Unknown time"
 
     # Build detailed booking information
-    booking_details = f"""📅 **Calendar Booking Approval Required**
+    booking_details = f"""📅 Calendar Booking Approval Required
 
-**Meeting Details:**
-• **Title:** {requirements.get('subject', 'Meeting')}
-• **Date/Time:** {formatted_time}
-• **Duration:** {requirements.get('duration_minutes', 60)} minutes
-• **Attendees:** {', '.join(requirements.get('attendees', [])) or 'No attendees specified'}
+Meeting Details:
+• Title: {requirements.get('subject', 'Meeting')}
+• Date/Time: {formatted_time}
+• Duration: {requirements.get('duration_minutes', 60)} minutes
+• Attendees: {', '.join(requirements.get('attendees', [])) or 'No attendees specified'}
 
-**Description:**
+Description:
 {requirements.get('description', 'No description provided')}
 
-**Status:** ✅ Time slot is AVAILABLE and ready to book
+Status: ✅ Time slot is AVAILABLE and ready to book
 
 Would you like to proceed with creating this calendar event?"""
 

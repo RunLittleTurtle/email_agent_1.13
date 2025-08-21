@@ -141,11 +141,18 @@ class EmailSenderAgent(BaseAgent):
         else:
             reply_subject = f"Re: {original_subject}"
 
+        # Use message_id for proper Gmail threading (e.g., <CAG41pbv...@mail.gmail.com>)
+        # If message_id is not available, fall back to email.id
+        reply_to_id = state.email.message_id or state.email.id
+        
+        self.logger.info(f"📧 Reply threading: Using message_id='{state.email.message_id}' or fallback id='{state.email.id}'")
+
         return {
             "to": state.email.sender,  # Reply to original sender
             "subject": reply_subject,
             "body": state.draft_response,
-            "reply_to_id": state.email.id,  # For threading
+            "reply_to_id": reply_to_id,  # Gmail Message-ID for proper threading
+            "thread_id": state.email.thread_id,  # Gmail thread ID for proper threading
             "from_address": "info@800m.ca"  # Your Gmail account
         }
 
@@ -190,8 +197,16 @@ class EmailSenderAgent(BaseAgent):
 
             self.logger.info(f"📦 Message encoded successfully, size: {len(encoded_message)} chars")
 
-            # Create the message body for Gmail API
+            # Create the message body for Gmail API with thread ID for proper threading
             create_message = {'raw': encoded_message}
+            
+            # CRITICAL: Add threadId to message metadata for proper Gmail threading
+            if email_data.get('thread_id'):
+                create_message['threadId'] = email_data['thread_id']
+                self.logger.info(f"🧵 Using Gmail thread ID: {email_data['thread_id']}")
+            else:
+                self.logger.warning("⚠️ No thread_id available - email will start new thread")
+                
             self.logger.info(f"📤 Calling Gmail API send with body: {list(create_message.keys())}")
 
             # Send via Gmail API

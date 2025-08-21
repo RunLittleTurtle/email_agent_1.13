@@ -109,7 +109,7 @@ class CalendarAgent(BaseAgent):
             is_available = parsed_result.get("availability_status") not in ["conflict", "unknown"]
             has_alternatives = len(parsed_result.get("suggested_times", [])) > 0
             is_meeting_request = requirements.get("is_meeting_request", False)
-            
+
             # Set booking intent flags for LLM router
             state.response_metadata["booking_intent"] = {
                 "requirements": requirements,
@@ -118,7 +118,7 @@ class CalendarAgent(BaseAgent):
                 "alternatives_suggested": has_alternatives,
                 "analysis_complete": True
             }
-            
+
             self.logger.info(f"Calendar analysis complete - ready_to_book: {state.response_metadata['booking_intent']['ready_to_book']}, slot_available: {is_available}")
             self.logger.info("LLM router will make final routing decision")
 
@@ -275,7 +275,7 @@ Your job is to:
 1. Use the list-events tool to check the requested time slot
 2. Look for any conflicts with existing events
 3. If conflicts exist, suggest 2-3 alternative times and days
-4. Report your findings clearly
+4. Report your findings clearly and in bullet points
 
 IMPORTANT: Only check and report. Never create events during availability checking.
 

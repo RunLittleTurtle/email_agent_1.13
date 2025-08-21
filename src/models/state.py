@@ -28,6 +28,7 @@ class EmailMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     attachments: Optional[List[str]] = Field(default_factory=list)
     thread_id: Optional[str] = None
+    message_id: Optional[str] = Field(None, description="Gmail Message-ID for reply threading (e.g., <CAG41pbv...@mail.gmail.com>)")
 
 
 class ExtractedContext(BaseModel):

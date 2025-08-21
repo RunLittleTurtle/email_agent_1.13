@@ -466,6 +466,8 @@ def gmail(
             sender = headers.get('From', 'Unknown')
             subject = headers.get('Subject', 'No Subject')
             date_str = headers.get('Date', '')
+            message_id = headers.get('Message-ID', None)  # Extract Gmail Message-ID for threading
+            thread_id = msg.get('threadId', None)  # Extract Gmail thread ID for proper threading
             
             # Extract recipients (To, Cc, Bcc)
             recipients = []
@@ -509,7 +511,9 @@ def gmail(
                 'body': body,
                 'recipients': recipients,  # Required field
                 'timestamp': datetime.now().isoformat(),
-                'attachments': []  # Empty list for now
+                'attachments': [],  # Empty list for now
+                'message_id': message_id,  # Add message_id for threading
+                'thread_id': thread_id  # Add thread_id for proper threading
             }
             
             fetched_emails.append(email_data)
