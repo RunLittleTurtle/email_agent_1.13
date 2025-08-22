@@ -10,6 +10,7 @@ from datetime import datetime
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
 from langsmith import traceable
 
 from src.models.state import AgentState
@@ -144,7 +145,14 @@ async def human_review_node(state: AgentState) -> AgentState:
                         state.draft_response = state.human_feedback  # Update draft with edited version
                 logger.info(f"✏️ Human provided instructions: {response_type}")
 
-            state.add_message("human", f"Decision: {state.response_metadata.get('decision', 'unknown')}")
+            # Add human decision as message using LangGraph pattern
+            from langchain_core.messages import HumanMessage
+            decision_message = HumanMessage(
+                content=f"Decision: {state.response_metadata.get('decision', 'unknown')}",
+                name="human_reviewer"
+            )
+            # Note: This will be automatically added to state via add_messages reducer
+            state.messages.append(decision_message)
         else:
             # Default to ignore if response format is unexpected
             state.response_metadata["decision"] = "ignore"
@@ -159,13 +167,20 @@ async def human_review_node(state: AgentState) -> AgentState:
 
 def create_workflow() -> StateGraph:
     """
-    Create full workflow with all agents + human interrupt + router
+    Create full workflow with all agents + human interrupt + router + persistence
     Flow: email_processor -> supervisor -> (calendar/rag/crm) -> adaptive_writer -> human_review -> router
+    
+    Features:
+    - LangGraph 0.6+ modern patterns
+    - MemorySaver for conversation persistence 
+    - Thread-based memory for multi-session conversations
+    - Time travel debugging capabilities
+    - Fault tolerance with checkpoint recovery
     """
     global email_processor_agent, supervisor_agent, adaptive_writer_agent
     global rag_agent, crm_agent, email_sender_agent  # Removed calendar_agent from globals
 
-    logger.info("🚀 Creating Agent Inbox Phase 2 Workflow with Multi-Agent Support...")
+    logger.info("🚀 Creating Agent Inbox Modern Workflow with LangGraph 0.6+ Features...")
 
     # Initialize all agents
     email_processor_agent = EmailProcessorAgent()
@@ -179,7 +194,7 @@ def create_workflow() -> StateGraph:
     # Create the calendar subgraph
     calendar_subgraph = create_calendar_subgraph()  # <-- NEW LINE
 
-    # Create workflow with AgentState
+    # Create workflow with modern LangGraph pattern - using AgentState as Pydantic schema
     workflow = StateGraph(AgentState)
 
     # Add all nodes
@@ -270,11 +285,20 @@ def create_workflow() -> StateGraph:
     workflow.add_edge("send_email", END)
 
     # CRITICAL: Using dynamic interrupts in human_review_node for Agent Inbox
-    # Note: In langgraph API mode, persistence is handled automatically
-    logger.info("🔧 Compiling workflow with action-based human review")
+    # MODERN: Add MemorySaver for conversation persistence and time travel
+    logger.info("🔧 Compiling workflow with MemorySaver persistence and action-based human review")
+    
+    # Initialize checkpointer for conversation memory and time travel debugging
+    memory = MemorySaver()
+    
+    # Compile with checkpointer for modern LangGraph features
+    app = workflow.compile(checkpointer=memory)
 
-    app = workflow.compile()
-
-    logger.info("✅ Phase 2 Workflow compiled successfully with multi-agent support")
+    logger.info("✅ Modern Workflow compiled successfully with:")
+    logger.info("    - Multi-agent support")
+    logger.info("    - Conversation persistence (MemorySaver)")
+    logger.info("    - Time travel debugging")
+    logger.info("    - Fault tolerance with checkpoint recovery")
+    logger.info("    - Thread-based memory management")
 
     return app

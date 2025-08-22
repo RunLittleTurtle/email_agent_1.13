@@ -5,8 +5,10 @@ Defines the shared state structure for all agents in the LangGraph workflow
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal, Sequence, Annotated
 from pydantic import BaseModel, Field
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 
 class EmailIntent(str, Enum):
@@ -84,10 +86,10 @@ class AgentState(BaseModel):
     Shared state for all agents in the workflow.
     This is the central state object that gets passed between agents.
     """
-    # Core state
-    messages: List[Dict[str, Any]] = Field(
+    # Core state - LangGraph native message handling
+    messages: Annotated[Sequence[AnyMessage], add_messages] = Field(
         default_factory=list,
-        description="Message history"
+        description="Message history using LangGraph add_messages reducer"
     )
     email: Optional[EmailMessage] = None
     extracted_context: Optional[ExtractedContext] = None
@@ -118,18 +120,25 @@ class AgentState(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     
-    def add_message(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None):
-        """Helper method to add a message to the state"""
-        message = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-            "agent": self.current_agent,
-        }
+    def add_ai_message(self, content: str, metadata: Optional[Dict[str, Any]] = None):
+        """Helper method to create an AI message (use sparingly - prefer LangGraph's add_messages)"""
+        from langchain_core.messages import AIMessage
+        message = AIMessage(content=content)
         if metadata:
-            message["metadata"] = metadata
-        self.messages.append(message)
+            message.additional_kwargs.update(metadata)
+        # Note: State updates should use return {"messages": [message]} in nodes
         self.updated_at = datetime.now()
+        return message
+    
+    def add_human_message(self, content: str, metadata: Optional[Dict[str, Any]] = None):
+        """Helper method to create a human message (use sparingly - prefer LangGraph's add_messages)"""
+        from langchain_core.messages import HumanMessage
+        message = HumanMessage(content=content)
+        if metadata:
+            message.additional_kwargs.update(metadata)
+        # Note: State updates should use return {"messages": [message]} in nodes
+        self.updated_at = datetime.now()
+        return message
     
     def add_error(self, error: str):
         """Helper method to add an error message"""

@@ -118,25 +118,94 @@ class BaseAgent(ABC):
             state.add_error(f"{self.name} failed: {str(e)}")
             return state
 
-    def _add_message(
+    def _add_message_to_state(
         self,
-        state: AgentState,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ):
+        metadata: Optional[Dict[str, Any]] = None,
+        message_type: str = "ai"
+    ) -> Dict[str, Any]:
         """
-        Helper method to add a message to state
-
+        Helper method to create message state update for LangGraph
+        
         Args:
-            state: Current state
             content: Message content
             metadata: Optional metadata
+            message_type: Type of message ("ai", "system", "human")
+            
+        Returns:
+            Dict containing message update for state
+            
+        Note:
+            Use in node returns like: return self._add_message_to_state(content)
         """
-        state.add_message(
-            role=self.name,
-            content=content,
-            metadata=metadata
+        if message_type == "ai":
+            message = self._create_ai_message(content, metadata)
+        elif message_type == "system":
+            message = self._create_system_message(content, metadata)
+        else:
+            from langchain_core.messages import HumanMessage
+            message = HumanMessage(content=f"[{self.name}] {content}")
+            if metadata:
+                message.additional_kwargs.update(metadata)
+        
+        return {"messages": [message]}
+
+    def _create_ai_message(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> 'AIMessage':
+        """
+        Create an AI message for LangGraph state updates
+        
+        Args:
+            content: Message content
+            metadata: Optional metadata
+            
+        Returns:
+            AIMessage: LangChain AIMessage object
+            
+        Note:
+            Use in node returns like: return {"messages": [self._create_ai_message(content)]}
+        """
+        from langchain_core.messages import AIMessage
+        
+        message = AIMessage(
+            content=f"[{self.name}] {content}",
+            name=self.name
         )
+        
+        if metadata:
+            message.additional_kwargs.update(metadata)
+            
+        return message
+    
+    def _create_system_message(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> 'SystemMessage':
+        """
+        Create a system message for LangGraph state updates
+        
+        Args:
+            content: Message content
+            metadata: Optional metadata
+            
+        Returns:
+            SystemMessage: LangChain SystemMessage object
+        """
+        from langchain_core.messages import SystemMessage
+        
+        message = SystemMessage(
+            content=f"[{self.name}] {content}",
+            name=self.name
+        )
+        
+        if metadata:
+            message.additional_kwargs.update(metadata)
+            
+        return message
 
     async def _call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
