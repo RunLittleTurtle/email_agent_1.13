@@ -101,7 +101,10 @@ class EmailSenderAgent(BaseAgent):
             if success:
                 success_msg = f"✅ Email sent successfully to {email_data['to']}"
                 self.logger.info(success_msg)
-                state.add_message("system", success_msg)
+                # Add success message using new LangGraph patterns
+                message_update = self._add_message_to_state(success_msg, message_type="system")
+                if "messages" in message_update:
+                    state.messages.extend(message_update["messages"])
                 state.status = "completed"
 
                 # Add sending metadata

@@ -179,12 +179,15 @@ class CalendarAgent(BaseAgent):
 
             # CRITICAL: Add the full booking response to output and messages
             if booking_response:
-                # Add to messages for history
-                self._add_message(
-                    state,
+                # Add to messages for history using new LangGraph patterns
+                message_update = self._add_message_to_state(
                     f"Calendar Agent: {booking_response}",
                     metadata=parsed_result
                 )
+                
+                # Apply message update to state
+                if "messages" in message_update:
+                    state.messages.extend(message_update["messages"])
 
                 # CRITICAL: Ensure output list exists and add the booking confirmation
                 if not hasattr(state, 'output') or state.output is None:
@@ -205,7 +208,15 @@ class CalendarAgent(BaseAgent):
                 if parsed_result.get("booked_event"):
                     fallback_msg = f"Successfully created calendar event: {requirements.get('subject')} at {requirements.get('requested_datetime')}"
 
-                    self._add_message(state, f"Calendar Agent: {fallback_msg}", metadata=parsed_result)
+                    # Use new LangGraph patterns for fallback message
+                    message_update = self._add_message_to_state(
+                        f"Calendar Agent: {fallback_msg}", 
+                        metadata=parsed_result
+                    )
+                    
+                    # Apply message update to state
+                    if "messages" in message_update:
+                        state.messages.extend(message_update["messages"])
 
                     if not hasattr(state, 'output') or state.output is None:
                         state.output = []
@@ -524,11 +535,15 @@ Return JSON:
         messages_list = result.get("messages", [])
         if messages_list and hasattr(messages_list[-1], 'content'):
             full_ai_response = messages_list[-1].content
-            self._add_message(
-                state,
+            # Use new LangGraph patterns for analysis message
+            message_update = self._add_message_to_state(
                 f"Calendar Agent: {full_ai_response}",
                 metadata=parsed_result
             )
+            
+            # Apply message update to state
+            if "messages" in message_update:
+                state.messages.extend(message_update["messages"])
 
             if not hasattr(state, 'output'):
                 state.output = []

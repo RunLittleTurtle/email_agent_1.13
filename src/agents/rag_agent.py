@@ -97,9 +97,8 @@ class RAGAgent(BaseAgent):
             # Generate RAG summary
             rag_summary = await self._generate_rag_response(state)
             
-            # Add summary message
-            self._add_message(
-                state,
+            # Add summary message using new LangGraph patterns
+            message_update = self._add_message_to_state(
                 rag_summary,
                 metadata={
                     "document_data": state.document_data.dict(),
@@ -107,6 +106,10 @@ class RAGAgent(BaseAgent):
                     "queries_processed": len(search_queries)
                 }
             )
+            
+            # Apply message update to state
+            if "messages" in message_update:
+                state.messages.extend(message_update["messages"])
             
             return state
             

@@ -111,10 +111,13 @@ Would you like to proceed with creating this calendar event?"""
 
     if booking_approved:
         logger.info("✅ Human APPROVED the booking")
-        state.add_message("system", f"Booking approved for: {requirements.get('subject')}")
+        # Use LangGraph message patterns
+        from langchain_core.messages import SystemMessage
+        state.messages.append(SystemMessage(content=f"Booking approved for: {requirements.get('subject')}"))
     else:
         logger.info("❌ Human REJECTED the booking")
-        state.add_message("system", "Calendar booking cancelled by user")
+        from langchain_core.messages import SystemMessage
+        state.messages.append(SystemMessage(content="Calendar booking cancelled by user"))
 
     return state
 
@@ -144,10 +147,11 @@ async def calendar_booking_node(state: AgentState) -> AgentState:
             # Add user-friendly message
             booking_intent = state.response_metadata.get("booking_intent", {})
             requirements = booking_intent.get("requirements", {})
-            state.add_message(
-                "system",
-                f"✅ Meeting '{requirements.get('subject', 'Meeting')}' has been scheduled"
-            )
+            # Use LangGraph message patterns
+            from langchain_core.messages import SystemMessage
+            state.messages.append(SystemMessage(
+                content=f"✅ Meeting '{requirements.get('subject', 'Meeting')}' has been scheduled"
+            ))
         else:
             logger.error("Failed to create calendar event")
 

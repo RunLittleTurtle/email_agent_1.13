@@ -214,12 +214,13 @@ Return the response in JSON format:
                 state.draft_response = formatted_response
                 state.response_metadata["generated_response"] = response_data
 
-                # Add message
-                self._add_message(
-                    state,
-                    f"Draft response generated with {response_data.get('confidence', 0):.0%} confidence",
-                    metadata=response_data
-                )
+                # Add message using new LangGraph patterns
+                confidence_msg = f"Draft response generated with {response_data.get('confidence', 0):.0%} confidence"
+                message_update = self._add_message_to_state(confidence_msg, metadata=response_data)
+                
+                # Apply message update to state
+                if "messages" in message_update:
+                    state.messages.extend(message_update["messages"])
 
                 return state
 

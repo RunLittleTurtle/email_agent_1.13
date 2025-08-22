@@ -69,7 +69,7 @@ async def test_workflow():
     }
     
     try:
-        result = await workflow.ainvoke(initial_state.dict(), config)
+        result = await workflow.ainvoke(initial_state.model_dump(), config)
         logger.info("Workflow completed successfully")
         logger.info(f"Draft response: {result.get('draft_response', 'No response generated')}")
         return result

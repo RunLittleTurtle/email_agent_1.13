@@ -96,9 +96,8 @@ class CRMAgent(BaseAgent):
             # Generate CRM summary
             crm_summary = self._generate_crm_summary(state.contact_data, crm_request)
             
-            # Add summary message
-            self._add_message(
-                state,
+            # Add summary message using new LangGraph patterns
+            message_update = self._add_message_to_state(
                 crm_summary,
                 metadata={
                     "contact_data": state.contact_data.dict(),
@@ -106,6 +105,10 @@ class CRMAgent(BaseAgent):
                     "task_delegation": crm_request.get("is_task_delegation", False)
                 }
             )
+            
+            # Apply message update to state
+            if "messages" in message_update:
+                state.messages.extend(message_update["messages"])
             
             return state
             

@@ -186,13 +186,14 @@ Return JSON:
                     for agent in execution_order[:-1]  # Exclude adaptive_writer from task list
                 ]
 
-                self._add_message(
-                    state,
-                    f"Routing plan: {' → '.join(execution_order)}. "
-                    f"Tasks: {'; '.join(agent_tasks) if agent_tasks else 'Direct response'}",
-                    metadata=decision
-                )
-
+                # Create routing message using new LangGraph patterns
+                routing_msg = f"Routing plan: {' → '.join(execution_order)}. " \
+                             f"Tasks: {'; '.join(agent_tasks) if agent_tasks else 'Direct response'}"
+                message_update = self._add_message_to_state(routing_msg, metadata=decision)
+                
+                # Apply message update to state and return
+                if "messages" in message_update:
+                    state.messages.extend(message_update["messages"])
                 return state
 
             except json.JSONDecodeError as e:

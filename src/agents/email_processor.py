@@ -115,14 +115,16 @@ Return JSON with two sections:
                 state.extracted_context = extracted_context
                 state.response_metadata["context_extraction"] = context_data
 
-                # Add message
-                self._add_message(
-                    state,
-                    f"Email processed. Summary: {parsing.get('summary', 'N/A')}, "
-                    f"Context: {len(extracted_context.key_entities)} entities, "
-                    f"{len(extracted_context.requested_actions)} actions, urgency={extracted_context.urgency_level}",
-                    metadata=parsed
-                )
+                # Add message using new LangGraph patterns
+                process_msg = f"Email processed. Summary: {parsing.get('summary', 'N/A')}, " \
+                             f"Context: {len(extracted_context.key_entities)} entities, " \
+                             f"{len(extracted_context.requested_actions)} actions, urgency={extracted_context.urgency_level}"
+                
+                message_update = self._add_message_to_state(process_msg, metadata=parsed)
+                
+                # Apply message update to state
+                if "messages" in message_update:
+                    state.messages.extend(message_update["messages"])
 
                 state.status = "processing"
 
