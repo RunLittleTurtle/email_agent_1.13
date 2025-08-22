@@ -10,7 +10,7 @@ from datetime import datetime
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
+# Removed MemorySaver import - using API-managed persistence
 from langsmith import traceable
 
 from src.models.state import AgentState
@@ -137,12 +137,19 @@ async def human_review_node(state: AgentState) -> AgentState:
                 state.response_metadata["decision"] = "instruction"
                 # Extract feedback from args
                 if response_args:
+                    feedback_text = ""
                     if isinstance(response_args, str):
-                        state.human_feedback = response_args
+                        feedback_text = response_args
                     elif isinstance(response_args, dict):
                         # For edit type, args might contain the edited draft
-                        state.human_feedback = response_args.get("args", {}).get("draft_response", "")
-                        state.draft_response = state.human_feedback  # Update draft with edited version
+                        feedback_text = response_args.get("args", {}).get("draft_response", "")
+                        state.draft_response = feedback_text  # Update draft with edited version
+                    
+                    # Store in both locations for compatibility
+                    state.human_feedback = feedback_text
+                    if "human_feedback" not in state.response_metadata:
+                        state.response_metadata["human_feedback"] = []
+                    state.response_metadata["human_feedback"].append(feedback_text)
                 logger.info(f"✏️ Human provided instructions: {response_type}")
 
             # Add human decision as message using LangGraph pattern
@@ -237,9 +244,38 @@ def create_workflow() -> StateGraph:
 
     # Add conditional routing from supervisor to specialized agents or adaptive_writer
     def route_from_supervisor(state: AgentState) -> str:
-        """Determine next node based on supervisor's routing decision"""
+        """Determine next node based on supervisor's routing decision with completion checks"""
         routing = state.response_metadata.get("routing", {})
         next_agent = routing.get("next", "adaptive_writer")
+        completed_agents = routing.get("completed_agents", [])
+
+        # CRITICAL: Override supervisor decision ONLY if no human feedback AND work is complete
+        # Check if calendar agent already completed successfully BUT respect human feedback
+        has_human_feedback = (
+            state.human_feedback or 
+            state.response_metadata.get("human_feedback") or
+            "HUMAN FEEDBACK FROM AGENT INBOX" in str(state.messages[-3:]) if state.messages else False
+        )
+        
+        if (next_agent == "calendar_agent" and 
+            "calendar_agent" in completed_agents and 
+            state.calendar_data and 
+            state.calendar_data.action_taken and 
+            ("successfully" in state.calendar_data.action_taken.lower() or 
+             "meeting_booked" in state.calendar_data.action_taken.lower() or
+             "event has been created" in state.calendar_data.action_taken.lower()) and
+            not has_human_feedback):  # ← ONLY override if NO human feedback
+            
+            logger.info("🛑 OVERRIDE: Calendar work already complete, forcing route to adaptive_writer")
+            next_agent = "adaptive_writer"
+            # Update routing to reflect override
+            routing["next"] = "adaptive_writer"
+            routing["override_reason"] = "Calendar agent already completed successfully"
+            state.response_metadata["routing"] = routing
+        elif has_human_feedback and next_agent == "calendar_agent":
+            logger.info("👤 HUMAN FEEDBACK DETECTED: Respecting supervisor's calendar_agent routing decision")
+            routing["override_reason"] = "Human feedback requires calendar modification"
+            state.response_metadata["routing"] = routing
 
         # Track which agent we're routing to for completion detection
         if next_agent in ["calendar_agent", "rag_agent", "crm_agent"]:
@@ -285,19 +321,16 @@ def create_workflow() -> StateGraph:
     workflow.add_edge("send_email", END)
 
     # CRITICAL: Using dynamic interrupts in human_review_node for Agent Inbox
-    # MODERN: Add MemorySaver for conversation persistence and time travel
-    logger.info("🔧 Compiling workflow with MemorySaver persistence and action-based human review")
+    # MODERN: LangGraph API handles persistence automatically
+    logger.info("🔧 Compiling workflow for LangGraph API compatibility")
     
-    # Initialize checkpointer for conversation memory and time travel debugging
-    memory = MemorySaver()
-    
-    # Compile with checkpointer for modern LangGraph features
-    app = workflow.compile(checkpointer=memory)
+    # Compile without custom checkpointer (API provides built-in persistence)
+    app = workflow.compile()
 
     logger.info("✅ Modern Workflow compiled successfully with:")
     logger.info("    - Multi-agent support")
-    logger.info("    - Conversation persistence (MemorySaver)")
-    logger.info("    - Time travel debugging")
+    logger.info("    - API-managed persistence")
+    logger.info("    - Built-in time travel debugging")
     logger.info("    - Fault tolerance with checkpoint recovery")
     logger.info("    - Thread-based memory management")
 

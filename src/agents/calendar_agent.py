@@ -66,7 +66,18 @@ class CalendarAgent(BaseAgent):
 
             self.logger.info("Analyzing calendar request for availability")
 
-            # Extract calendar requirements
+            # CRITICAL: Check for human feedback first
+            human_feedback = state.human_feedback or (
+                state.response_metadata.get("human_feedback", [])[-1] 
+                if state.response_metadata.get("human_feedback", []) else None
+            )
+            
+            if human_feedback:
+                self.logger.info(f"🔄 Processing human feedback: {human_feedback}")
+                # Override system output to show human feedback processing
+                state.response_metadata["system_output"] = f"Processing human modification: {human_feedback}"
+
+            # Extract calendar requirements (will use human feedback if available)
             requirements = await self._extract_calendar_requirements(state)
 
             if not requirements or not requirements.get("is_meeting_request"):
@@ -360,7 +371,38 @@ Include the meeting link in your response."""
         current_year = current_date.year
         current_date_str = current_date.strftime("%Y-%m-%d")
 
-        prompt = f"""Extract calendar info from this email:
+        # Check for human feedback that modifies the request
+        human_feedback = state.human_feedback or (
+            state.response_metadata.get("human_feedback", [])[-1] 
+            if state.response_metadata.get("human_feedback", []) else None
+        )
+
+        if human_feedback:
+            prompt = f"""IMPORTANT: HUMAN FEEDBACK RECEIVED - This modifies the original request.
+
+ORIGINAL EMAIL:
+SUBJECT: {email.subject}
+FROM: {email.sender}
+BODY: {email.body}
+
+HUMAN FEEDBACK (OVERRIDES ORIGINAL):
+"{human_feedback}"
+
+Current date: {current_date_str} (year {current_year})
+
+CRITICAL: Use the HUMAN FEEDBACK to modify the meeting details. If human mentions a new date like "september 3" or "change for september 3", use that as the new requested date for year {current_year}.
+
+Return JSON with MODIFIED requirements based on human feedback:
+{{
+    "is_meeting_request": true,
+    "requested_datetime": "ISO format with timezone (USE HUMAN FEEDBACK DATE)",
+    "duration_minutes": 30,
+    "attendees": ["email@example.com"],
+    "subject": "Meeting title (may be modified by human feedback)",
+    "description": "Meeting description (include that this was modified per human request)"
+}}"""
+        else:
+            prompt = f"""Extract calendar info from this email:
 
 SUBJECT: {email.subject}
 FROM: {email.sender}

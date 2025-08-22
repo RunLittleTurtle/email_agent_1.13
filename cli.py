@@ -322,14 +322,28 @@ async def _run_email_workflow(sender: str, subject: str, body: str, wait: bool):
                 # Start workflow
                 progress.update(task, description="Starting email workflow...")
                 
+                # Create proper AgentState structure for modernized workflow
+                workflow_input = {
+                    "email": test_email,
+                    "workflow_id": thread_id,
+                    "messages": [],
+                    "current_agent": None,
+                    "status": "pending",
+                    "draft_response": None,
+                    "output": [],
+                    "errors": [],
+                    "extracted_context": None,
+                    "document_data": None,
+                    "contact_data": None,
+                    "calendar_data": None,
+                    "response_metadata": {}
+                }
+                
                 run_response = await client.post(
                     f"{LANGGRAPH_API}/threads/{thread_id}/runs",
                     json={
                         "assistant_id": "email_agent",
-                        "input": {
-                            "email": test_email,
-                            "messages": []
-                        }
+                        "input": workflow_input
                     }
                 )
                 
@@ -558,44 +572,81 @@ def gmail(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]❌ Error fetching Gmail: {e}[/red]")
+        import traceback
+        console.print(f"[red]Full traceback: {traceback.format_exc()}[/red]")
         raise typer.Exit(1)
 
 
 async def _send_email_to_workflow(email_data):
-    """Send email to LangGraph workflow for processing"""
+    """Send email to LangGraph API server for processing"""
+    import uuid
+    
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Create thread
-        thread_response = await client.post(
-            f"{LANGGRAPH_API}/threads",
-            json={"metadata": {"source": "gmail_cli"}}
-        )
-        
-        if thread_response.status_code != 200:
-            console.print(f"[red]❌ Failed to create thread: {thread_response.text}[/red]")
-            return
-        
-        thread_data = thread_response.json()
-        thread_id = thread_data["thread_id"]
-        
-        # Start workflow
-        run_response = await client.post(
-            f"{LANGGRAPH_API}/threads/{thread_id}/runs",
-            json={
-                "assistant_id": "email_agent",
-                "input": {"email": email_data},
-                "stream_mode": "values"
+        try:
+            # Create thread
+            console.print("🔄 Creating thread via LangGraph API...")
+            thread_response = await client.post(
+                f"{LANGGRAPH_API}/threads",
+                json={"metadata": {"source": "gmail_cli"}}
+            )
+            
+            if thread_response.status_code != 200:
+                console.print(f"[red]❌ Failed to create thread: {thread_response.text}[/red]")
+                return
+            
+            thread_data = thread_response.json()
+            thread_id = thread_data["thread_id"]
+            console.print(f"✅ Thread created: [bold]{thread_id}[/bold]")
+            
+            # Prepare workflow input with proper AgentState structure
+            workflow_input = {
+                "email": email_data,
+                "workflow_id": thread_id,
+                "messages": [],
+                "current_agent": None,
+                "status": "processing",
+                "draft_response": None,
+                "output": [],
+                "error_messages": [],
+                "extracted_context": None,
+                "document_data": None,
+                "contact_data": None,
+                "calendar_data": None,
+                "response_metadata": {}
             }
-        )
-        
-        if run_response.status_code != 200:
-            console.print(f"[red]❌ Failed to start workflow: {run_response.text}[/red]")
+            
+            console.print("🚀 Starting workflow run...")
+            # Start workflow run
+            run_response = await client.post(
+                f"{LANGGRAPH_API}/threads/{thread_id}/runs",
+                json={
+                    "assistant_id": "email_agent",
+                    "input": workflow_input,
+                    "stream_mode": "values"
+                }
+            )
+            
+            if run_response.status_code != 200:
+                console.print(f"[red]❌ Failed to start workflow: {run_response.status_code}[/red]")
+                console.print(f"[red]Response: {run_response.text}[/red]")
+                try:
+                    error_data = run_response.json()
+                    console.print(f"[red]Error details: {error_data}[/red]")
+                except:
+                    pass
+                return
+            
+            run_data = run_response.json()
+            console.print(f"✅ Email sent to workflow!")
+            console.print(f"   Thread ID: [bold]{thread_id}[/bold]")
+            console.print(f"   Run ID: [bold]{run_data['run_id']}[/bold]")
+            console.print(f"🎯 Check Agent Inbox at: [link]{AGENT_INBOX_UI}[/link]")
+            
+        except Exception as e:
+            console.print(f"[red]❌ API workflow error: {e}[/red]")
+            import traceback
+            console.print(f"[red]Traceback: {traceback.format_exc()}[/red]")
             return
-        
-        run_data = run_response.json()
-        console.print(f"✅ Email sent to workflow!")
-        console.print(f"   Thread ID: [bold]{thread_id}[/bold]")
-        console.print(f"   Run ID: [bold]{run_data['run_id']}[/bold]")
-        console.print(f"🎯 Check Agent Inbox at: [link]{AGENT_INBOX_UI}[/link]")
 
 
 def _update_cli_commands_with_gmail():

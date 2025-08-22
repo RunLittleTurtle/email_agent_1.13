@@ -36,15 +36,28 @@ async def router_node(state: AgentState) -> AgentState:
         state.response_metadata["router_decision"] = "send_email"
 
     elif decision == "instruction":
-        # Human provided instructions/feedback → back to Supervisor
+        # Human provided instructions/feedback → check if work is already complete
         if feedback:
             if "human_feedback" not in state.response_metadata:
                 state.response_metadata["human_feedback"] = []
             state.response_metadata["human_feedback"].append(feedback)
             logger.info("📥 Stored human feedback in state.response_metadata")
 
-        logger.info("✏️ Human provided instructions, will route back to supervisor")
-        state.response_metadata["router_decision"] = "supervisor"
+        # CRITICAL: Check if specialized agents already completed their work
+        routing = state.response_metadata.get("routing", {})
+        completed_agents = routing.get("completed_agents", [])
+        
+        # If calendar agent completed successfully, don't loop back to supervisor
+        if ("calendar_agent" in completed_agents and 
+            state.calendar_data and 
+            state.calendar_data.action_taken and 
+            "successfully" in state.calendar_data.action_taken.lower()):
+            
+            logger.info("🛑 Calendar work complete - ending workflow to prevent loop")
+            state.response_metadata["router_decision"] = "END"
+        else:
+            logger.info("✏️ Human provided instructions, will route back to supervisor")
+            state.response_metadata["router_decision"] = "supervisor"
 
     else:
         # Default case: ignore → end workflow

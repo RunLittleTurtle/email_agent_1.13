@@ -48,9 +48,28 @@ class EmailProcessorAgent(BaseAgent):
             # System prompt for parsing + context extraction
             system_prompt = """You are an email parsing and context extraction assistant.
             Extract and structure key information from emails, including entities, actions, and urgency.
-            IMPORTANT:Be very clear when you formulate your response, since the supervisor and the rest of the graph will use your ouput.
+            IMPORTANT: Be very clear when you formulate your response, since the supervisor and the rest of the graph will use your output.
+            
+            CRITICAL: Pay special attention to calendar modification language:
+            - "change the event/meeting" = modification
+            - "reschedule" = modification  
+            - "move the meeting" = modification
+            - "update the booking" = modification
+            - "new date/time" = modification
+            - "different day" = modification
+            
             Always respond in valid JSON format.
             For dates, use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)."""
+
+            # Check for conversation history in thread memory
+            conversation_context = ""
+            if state.messages:
+                recent_messages = state.messages[-5:]  # Last 5 messages for context
+                conversation_context = "\n\nPREVIOUS CONVERSATION CONTEXT:\n"
+                for msg in recent_messages:
+                    if hasattr(msg, 'content') and msg.content:
+                        msg_type = msg.__class__.__name__.replace('Message', '')
+                        conversation_context += f"[{msg_type}]: {msg.content[:200]}...\n"
 
             # Combined parsing + extraction prompt
             prompt = f"""Parse and extract context from this email:
@@ -58,7 +77,7 @@ class EmailProcessorAgent(BaseAgent):
 Subject: {state.email.subject}
 From: {state.email.sender}
 To: {', '.join(state.email.recipients)}
-Body: {state.email.body}
+Body: {state.email.body}{conversation_context}
 
 Return JSON with two sections:
 {{
@@ -71,7 +90,9 @@ Return JSON with two sections:
         "urgency_indicators": ["list of urgency indicators if any"],
         "key_points": ["list of main points"],
         "questions_asked": ["list of specific questions if any"],
-        "past_emails_summary": ["list of summaries of past emails"]
+        "past_emails_summary": ["list of summaries of past emails"],
+        "conversation_type": "new_request|follow_up|modification|confirmation",
+        "previous_meeting_context": "any context about existing meetings or bookings from conversation history"
 
     }},
     "context": {{
@@ -95,25 +116,25 @@ Return JSON with two sections:
 
                 # --- Parsing results ---
                 parsing = parsed.get("parsing", {})
-                state.response_metadata["email_parsing"] = parsing
+                context = parsed.get("context", {})
 
-                # --- Context extraction results ---
-                context_data = parsed.get("context", {})
+                # Store results in state with consistent field names
+                state.response_metadata["email_parsing"] = parsing
+                state.response_metadata["context_extraction"] = context
 
                 extracted_context = ExtractedContext(
-                    key_entities=context_data.get("key_entities", []),
+                    key_entities=context.get("key_entities", []),
                     dates_mentioned=[
                         datetime.fromisoformat(date) if date else None
-                        for date in context_data.get("dates_mentioned", [])
+                        for date in context.get("dates_mentioned", [])
                         if date
                     ],
-                    requested_actions=context_data.get("requested_actions", []),
-                    urgency_level=context_data.get("urgency_level", "medium"),
-                    sentiment=context_data.get("sentiment", "neutral")
+                    requested_actions=context.get("requested_actions", []),
+                    urgency_level=context.get("urgency_level", "medium"),
+                    sentiment=context.get("sentiment", "neutral")
                 )
 
                 state.extracted_context = extracted_context
-                state.response_metadata["context_extraction"] = context_data
 
                 # Add message using new LangGraph patterns
                 process_msg = f"Email processed. Summary: {parsing.get('summary', 'N/A')}, " \

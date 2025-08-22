@@ -144,7 +144,10 @@ async def llm_routing_node(state: AgentState) -> AgentState:
     )
     logger.info(f"✅ LLM decision received: {decision}")
     
-    # Update booking intent with LLM decision
+    # Ensure booking_intent exists, then update with LLM decision
+    if "booking_intent" not in state.response_metadata:
+        state.response_metadata["booking_intent"] = {}
+    
     state.response_metadata["booking_intent"].update({
         "ready_to_book": decision.get("ready_to_book", False),
         "slot_available": decision.get("slot_available", False),

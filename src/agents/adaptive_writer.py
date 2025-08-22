@@ -136,6 +136,21 @@ class AdaptiveWriterAgent(BaseAgent):
                     message = output.get("message", "")
                     if message:
                         context_parts.append(f"  • {agent_name}: {message}")
+                        # Extract meeting links from agent output messages if calendar data doesn't have it
+                        if agent_name == "calendar_agent" and "https://" in message:
+                            import re
+                            link_patterns = [
+                                r'https://meet\.google\.com/[a-z0-9-]+',
+                                r'https://zoom\.us/j/\d+',
+                                r'https://teams\.microsoft\.com/[^\s]+',
+                                r'https://[^\s]+meet[^\s]*'
+                            ]
+                            for pattern in link_patterns:
+                                match = re.search(pattern, message, re.IGNORECASE)
+                                if match:
+                                    meeting_link = match.group(0)
+                                    context_parts.append(f"  📎 Meeting Link Found: {meeting_link}")
+                                    break
 
             # System prompt for response generation
             system_prompt = """You are a professional email response writer.
@@ -187,6 +202,8 @@ Generate a professional email response that:
 7. Use the complete OUTPUT of the specialized agents like the calendar agent, document agent, and contact agent
 8. Always format the draft email so it is easy to read and nice to the eye
 9. If some information is missing due to agent failures, acknowledge this appropriately
+10. IMPORTANT: If a meeting link is found in the context (like Google Meet, Zoom, Teams links), ALWAYS include it in the response
+11. Include ALL relevant details from successful calendar bookings, including meeting links, date/time confirmations, and attendee information
 
 Return the response in JSON format:
 {{
