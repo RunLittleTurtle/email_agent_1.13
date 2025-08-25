@@ -20,6 +20,9 @@ python cli.py email
 python cli.py --help
 python cli.py email --help
 
+# Setup Gmail OAuth authentication (REQUIRED FIRST TIME)
+python cli.py setup-oauth               # Setup Google OAuth for Gmail access
+
 # Fetch latest Gmail emails and trigger workflow
 python cli.py gmail                     # Fetch 1 latest email and send to workflow
 python cli.py gmail --count 5           # Fetch 5 latest emails

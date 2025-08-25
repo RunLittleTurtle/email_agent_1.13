@@ -743,6 +743,49 @@ def start(
 
 
 @app.command()
+def setup_oauth():
+    """
+    🔐 Setup Gmail OAuth authentication
+    
+    Runs the OAuth setup process to authenticate with Gmail.
+    """
+    console.print(Panel.fit(
+        "🔐 [bold green]Gmail OAuth Setup[/bold green]",
+        subtitle="Authenticate with Google Gmail"
+    ))
+    
+    ensure_venv()
+    
+    try:
+        oauth_script = PROJECT_ROOT / "simple_oauth_setup.py"
+        if not oauth_script.exists():
+            console.print("[red]❌ OAuth setup script not found![/red]")
+            console.print(f"Expected: {oauth_script}")
+            raise typer.Exit(1)
+        
+        console.print("🚀 Starting OAuth setup process...")
+        console.print("💡 A browser window will open for Google authentication")
+        console.print()
+        
+        # Run the OAuth setup script
+        result = subprocess.run([
+            sys.executable, str(oauth_script)
+        ], cwd=PROJECT_ROOT, capture_output=False, text=True)
+        
+        if result.returncode == 0:
+            console.print("\n[green]✅ OAuth setup completed successfully![/green]")
+            console.print("💡 You can now run: [bold]python cli.py gmail[/bold]")
+        else:
+            console.print(f"\n[red]❌ OAuth setup failed with exit code: {result.returncode}[/red]")
+            console.print("💡 Please check the error messages above")
+            raise typer.Exit(1)
+            
+    except Exception as e:
+        console.print(f"[red]❌ Error during OAuth setup: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def status():
     """
     📊 Check status of all services
