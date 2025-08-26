@@ -37,13 +37,16 @@ cd agent_inbox
 
 ### 1. Python Environment
 ```bash
-# Create virtual environment
+# Create virtual environment (IMPORTANT: Use .venv not venv)
 python3.13 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install Python dependencies
+# Install Python dependencies (includes langgraph-api for server)
 pip install --upgrade pip
 pip install -r requirements.txt
+
+# Verify core packages are installed
+python -c "import langgraph; import langchain; import psutil; print('✅ Core packages imported successfully')"
 ```
 
 ### 2. Node.js Dependencies
@@ -66,20 +69,38 @@ cp .env.example .env
 # - Other keys as needed
 ```
 
-### 4. Google Authentication
+### 4. Agent Inbox UI Setup (Next.js)
 ```bash
-# Run OAuth setup (will open browser)
+# Navigate to frontend and install dependencies
+cd agent-inbox
+yarn install
+
+# Create required utility files (if missing)
+mkdir -p src/lib
+# utils.ts and client.ts should be created automatically during setup
+```
+
+### 5. Google Authentication Setup
+```bash
+# IMPORTANT: OAuth requires credentials.json file
+# If missing, run the credential setup first:
+python simple_oauth_setup.py  # This will open browser for authentication
+
+# Alternative: Use CLI setup (may require credentials.json)
 python cli.py setup-oauth
 ```
 
-### 5. Start Services
+### 6. Start Services
 ```bash
-# Start everything
+# Start everything (will auto-detect and use available ports)
 python cli.py start
 
 # Or individually:
 python cli.py langgraph  # Backend API
 python cli.py inbox      # Frontend UI
+
+# Check status
+python cli.py status
 ```
 
 ## 🔧 API Keys Required
@@ -128,27 +149,70 @@ agent_inbox/
 
 ## 🔍 Troubleshooting
 
-**Python Import Errors:**
+### Common Setup Issues
+
+**❌ "Module not found: psutil"**
 ```bash
-source .venv/bin/activate
+# Make sure you're in the correct virtual environment
+source .venv/bin/activate  # NOT venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Node.js Issues:**
+**❌ "Required package 'langgraph-api' is not installed"**
+```bash
+# Install with inmem flag
+source .venv/bin/activate
+pip install -U "langgraph-cli[inmem]"
+```
+
+**❌ Next.js "Module not found: '@/lib/utils'" or "@/lib/client"**
 ```bash
 cd agent-inbox
-rm -rf node_modules yarn.lock
+mkdir -p src/lib
+
+# Create utils.ts
+cat > src/lib/utils.ts << 'EOF'
+import { type ClassValue, clsx } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+EOF
+
+# Install dependencies if missing
 yarn install
 ```
 
-**Gmail Authentication:**
+**❌ OAuth "credentials.json not found"**
 ```bash
-python cli.py setup-oauth
+# Create credentials.json from your Google OAuth app
+# Or use the simple OAuth setup that creates it automatically
+python simple_oauth_setup.py
 ```
 
-**Port Conflicts:**
+**❌ Virtual Environment Issues**
+```bash
+# Remove old environment and recreate
+rm -rf venv .venv
+python3.13 -m venv .venv  # Use .venv NOT venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+**❌ Port Conflicts**
 ```bash
 # Kill existing processes
 python cli.py stop
+pkill -f "next dev"
+pkill -f "langgraph"
 python cli.py start
+```
+
+**❌ Node.js/Yarn Issues**
+```bash
+cd agent-inbox
+rm -rf node_modules yarn.lock .next
+yarn install
 ```

@@ -112,7 +112,19 @@ pip install --upgrade pip
 # Install Python dependencies
 info "Installing Python dependencies..."
 pip install -r requirements.txt
-success "Python dependencies installed"
+
+# Ensure langgraph-api is installed (critical for server)
+info "Installing langgraph-api with inmem support..."
+pip install -U "langgraph-cli[inmem]"
+
+# Verify core packages work
+info "Verifying core package imports..."
+python -c "import langgraph; import langchain; import psutil; print('✅ Core packages working')" || {
+    error "Core package import failed. Reinstalling requirements..."
+    pip install --force-reinstall -r requirements.txt
+}
+
+success "Python dependencies installed and verified"
 
 # Setup environment file
 info "Setting up environment configuration..."
@@ -128,7 +140,31 @@ fi
 info "Installing Node.js dependencies..."
 cd agent-inbox
 yarn install
-success "Node.js dependencies installed"
+
+# Create required Next.js utility files if missing
+info "Setting up Next.js utility files..."
+mkdir -p src/lib
+
+# Create utils.ts if missing
+if [ ! -f "src/lib/utils.ts" ]; then
+    info "Creating src/lib/utils.ts..."
+    cat > src/lib/utils.ts << 'EOF'
+import { type ClassValue, clsx } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+EOF
+    success "Created src/lib/utils.ts"
+fi
+
+# Check if client.ts exists, if not warn user
+if [ ! -f "src/lib/client.ts" ]; then
+    warning "src/lib/client.ts missing - will be created during first run"
+fi
+
+success "Node.js dependencies installed and configured"
 cd ..
 
 # Check for required API keys
