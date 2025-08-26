@@ -503,17 +503,17 @@ def gmail(
                 body_data = msg['payload']['body']['data']
                 body = base64.urlsafe_b64decode(body_data).decode('utf-8')
             
-            # Create email object (matching EmailMessage model)
+            # Create email object (matching EmailMessage model from state.py)
             email_data = {
                 'id': message['id'],
-                'sender': sender,
                 'subject': subject,
                 'body': body,
+                'sender': sender,
                 'recipients': recipients,  # Required field
                 'timestamp': datetime.now().isoformat(),
                 'attachments': [],  # Empty list for now
-                'message_id': message_id,  # Add message_id for threading
-                'thread_id': thread_id  # Add thread_id for proper threading
+                'thread_id': thread_id,  # Gmail thread ID for proper threading
+                'message_id': message_id,  # Gmail Message-ID for threading
             }
             
             fetched_emails.append(email_data)
@@ -563,39 +563,70 @@ def gmail(
 
 async def _send_email_to_workflow(email_data):
     """Send email to LangGraph workflow for processing"""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Create thread
-        thread_response = await client.post(
-            f"{LANGGRAPH_API}/threads",
-            json={"metadata": {"source": "gmail_cli"}}
-        )
-        
-        if thread_response.status_code != 200:
-            console.print(f"[red]❌ Failed to create thread: {thread_response.text}[/red]")
-            return
-        
-        thread_data = thread_response.json()
-        thread_id = thread_data["thread_id"]
-        
-        # Start workflow
-        run_response = await client.post(
-            f"{LANGGRAPH_API}/threads/{thread_id}/runs",
-            json={
-                "assistant_id": "email_agent",
-                "input": {"email": email_data},
-                "stream_mode": "values"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Create thread
+            thread_response = await client.post(
+                f"{LANGGRAPH_API}/threads",
+                json={"metadata": {"source": "gmail_cli"}}
+            )
+            
+            if thread_response.status_code != 200:
+                console.print(f"[red]❌ Failed to create thread: {thread_response.status_code}[/red]")
+                console.print(f"Response: {thread_response.text}")
+                return
+            
+            thread_data = thread_response.json()
+            thread_id = thread_data["thread_id"]
+            
+            # Create initial state matching our AgentState structure
+            initial_state = {
+                "email": email_data,
+                "messages": [],
+                "output": [],
+                "dynamic_context": {
+                    "insights": [],
+                    "execution_metadata": {},
+                    "context_updates": {}
+                },
+                "long_term_memory": None,
+                "status": "processing",
+                "intent": None,
+                "extracted_context": None,
+                "draft_response": None,
+                "response_metadata": {},
+                "error_messages": [],
+                "calendar_data": None,
+                "document_data": None,
+                "contact_data": None,
+                "created_at": datetime.now().isoformat()
             }
-        )
-        
-        if run_response.status_code != 200:
-            console.print(f"[red]❌ Failed to start workflow: {run_response.text}[/red]")
-            return
-        
-        run_data = run_response.json()
-        console.print(f"✅ Email sent to workflow!")
-        console.print(f"   Thread ID: [bold]{thread_id}[/bold]")
-        console.print(f"   Run ID: [bold]{run_data['run_id']}[/bold]")
-        console.print(f"🎯 Check Agent Inbox at: [link]{AGENT_INBOX_UI}[/link]")
+            
+            # Start workflow with proper state structure
+            run_response = await client.post(
+                f"{LANGGRAPH_API}/threads/{thread_id}/runs",
+                json={
+                    "assistant_id": "email_agent",
+                    "input": initial_state,
+                    "stream_mode": "values"
+                }
+            )
+            
+            if run_response.status_code != 200:
+                console.print(f"[red]❌ Failed to start workflow: {run_response.status_code}[/red]")
+                console.print(f"Response: {run_response.text}")
+                return
+            
+            run_data = run_response.json()
+            console.print(f"✅ Email sent to workflow!")
+            console.print(f"   Thread ID: [bold]{thread_id}[/bold]")
+            console.print(f"   Run ID: [bold]{run_data['run_id']}[/bold]")
+            console.print(f"🎯 Check Agent Inbox at: [link]{AGENT_INBOX_UI}[/link]")
+            
+    except Exception as e:
+        console.print(f"[red]❌ Error sending email to workflow: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
 
 def _update_cli_commands_with_gmail():

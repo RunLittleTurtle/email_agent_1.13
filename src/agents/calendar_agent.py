@@ -177,26 +177,26 @@ class CalendarAgent(BaseAgent):
                 state.calendar_data.action_taken = "meeting_booked"
                 state.calendar_data.attendees_notified = parsed_result.get("attendees_notified", [])
 
-            # CRITICAL: Add the full booking response to output and messages
+            # CRITICAL: Add the full booking response to messages and output
             if booking_response:
-                # Add to messages for history
-                self._add_message(
-                    state,
-                    f"Calendar Agent: {booking_response}",
-                    metadata=parsed_result
+                # Add AI message to state.messages for downstream agents
+                from langchain_core.messages import AIMessage
+                ai_message = AIMessage(
+                    content=booking_response,
+                    name="calendar_agent"
+                )
+                state.messages.append(ai_message)
+                
+                # Add structured output using new AgentOutput model
+                state.add_agent_output(
+                    agent="calendar_agent",
+                    message=booking_response,
+                    confidence=1.0,
+                    data=parsed_result,
+                    tools_used=["google_calendar"]
                 )
 
-                # CRITICAL: Ensure output list exists and add the booking confirmation
-                if not hasattr(state, 'output') or state.output is None:
-                    state.output = []
-
-                # Add the FULL booking response with all details
-                state.output.append({
-                    "agent": "CALENDAR AGENT",
-                    "message": booking_response  # This contains meeting link, attendees, etc.
-                })
-
-                self.logger.info(f"✅ Added booking response to output: {booking_response[:100]}...")
+                self.logger.info(f"✅ Added booking response to state: {booking_response[:100]}...")
                 self.logger.info(f"Output now has {len(state.output)} entries")
 
             else:
@@ -205,15 +205,22 @@ class CalendarAgent(BaseAgent):
                 if parsed_result.get("booked_event"):
                     fallback_msg = f"Successfully created calendar event: {requirements.get('subject')} at {requirements.get('requested_datetime')}"
 
-                    self._add_message(state, f"Calendar Agent: {fallback_msg}", metadata=parsed_result)
-
-                    if not hasattr(state, 'output') or state.output is None:
-                        state.output = []
-
-                    state.output.append({
-                        "agent": "CALENDAR AGENT",
-                        "message": fallback_msg
-                    })
+                    # Add AI message to state.messages for downstream agents
+                    from langchain_core.messages import AIMessage
+                    ai_message = AIMessage(
+                        content=fallback_msg,
+                        name="calendar_agent"
+                    )
+                    state.messages.append(ai_message)
+                    
+                    # Add structured output
+                    state.add_agent_output(
+                        agent="calendar_agent",
+                        message=fallback_msg,
+                        confidence=0.8,
+                        data=parsed_result,
+                        tools_used=["google_calendar"]
+                    )
                 else:
                     state.add_error("Failed to create calendar event - no confirmation received")
                     self.logger.error("Failed to create calendar event")
@@ -524,18 +531,27 @@ Return JSON:
         messages_list = result.get("messages", [])
         if messages_list and hasattr(messages_list[-1], 'content'):
             full_ai_response = messages_list[-1].content
-            self._add_message(
-                state,
-                f"Calendar Agent: {full_ai_response}",
-                metadata=parsed_result
+            
+            # Add AI message to state.messages for downstream agents
+            from langchain_core.messages import AIMessage
+            ai_message = AIMessage(
+                content=full_ai_response,
+                name="calendar_agent"
             )
-
-            if not hasattr(state, 'output'):
-                state.output = []
-            state.output.append({
-                "agent": "CALENDAR AGENT",
-                "message": full_ai_response
-            })
+            state.messages.append(ai_message)
+            
+            # Add structured output using new AgentOutput model
+            state.add_agent_output(
+                agent="calendar_agent",
+                message=full_ai_response,
+                confidence=0.9,
+                data=parsed_result,
+                tools_used=["google_calendar"]
+            )
+            
+            self.logger.info(f"✅ Added calendar analysis to state: {full_ai_response[:100]}...")
+        else:
+            self.logger.warning("No AI response found in calendar analysis result")
 
     # Backward compatibility method
     @traceable(name="calendar_agent_process", tags=["agent", "calendar"])

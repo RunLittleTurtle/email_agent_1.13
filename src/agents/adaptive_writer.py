@@ -25,7 +25,7 @@ class AdaptiveWriterAgent(BaseAgent):
         )
 
     @traceable(name="adaptive_writer_process", tags=["agent", "writer"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime=None) -> Dict[str, Any]:
         """
         Generate email response based on all gathered context
 
@@ -38,7 +38,7 @@ class AdaptiveWriterAgent(BaseAgent):
         try:
             if not state.email:
                 state.add_error("No email to respond to")
-                return state
+                return {"error_messages": ["No email to respond to"]}
 
             self.logger.info("Generating email response")
 
@@ -132,8 +132,9 @@ class AdaptiveWriterAgent(BaseAgent):
             if hasattr(state, 'output') and state.output:
                 context_parts.append("\n🤖 Detailed Agent Outputs:")
                 for output in state.output:
-                    agent_name = output.get("agent", "Unknown Agent")
-                    message = output.get("message", "")
+                    # AgentOutput is a Pydantic model, access attributes directly
+                    agent_name = output.agent if hasattr(output, 'agent') else "Unknown Agent"
+                    message = output.message if hasattr(output, 'message') else ""
                     if message:
                         context_parts.append(f"  • {agent_name}: {message}")
 
@@ -210,27 +211,29 @@ Return the response in JSON format:
                 # Format the complete response
                 formatted_response = response_data.get("body", "")
 
-                # Store draft response
-                state.draft_response = formatted_response
-                state.response_metadata["generated_response"] = response_data
-
-                # Add message
-                self._add_message(
-                    state,
+                # Create completion message with modern pattern
+                completion_message = self.create_ai_message(
                     f"Draft response generated with {response_data.get('confidence', 0):.0%} confidence",
                     metadata=response_data
                 )
 
-                return state
+                return {
+                    "messages": [completion_message],
+                    "draft_response": formatted_response,
+                    "response_metadata": {"generated_response": response_data}
+                }
 
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse response generation: {e}")
                 # Try to extract response from raw text
-                state.draft_response = response
-                state.add_error(f"Response parsing failed, using raw response: {str(e)}")
-                return state
+                error_msg = f"Response parsing failed, using raw response: {str(e)}"
+                return {
+                    "draft_response": response,
+                    "error_messages": [error_msg]
+                }
 
         except Exception as e:
             self.logger.error(f"Response generation failed: {str(e)}", exc_info=True)
-            state.add_error(f"Response generation failed: {str(e)}")
-            return state
+            return {
+                "error_messages": [f"Response generation failed: {str(e)}"]
+            }

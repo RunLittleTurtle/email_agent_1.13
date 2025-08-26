@@ -130,7 +130,8 @@ async def llm_routing_node(state: AgentState) -> AgentState:
     # Get the analysis output from the last output message
     analysis_output = ""
     if state.output and len(state.output) > 0:
-        analysis_output = state.output[-1].get("message", "")
+        # AgentOutput is a Pydantic model, access message attribute directly
+        analysis_output = state.output[-1].message
         logger.info(f"💬 Analysis output: {analysis_output[:200]}...")
     else:
         logger.warning("⚠️ No output messages found in state")

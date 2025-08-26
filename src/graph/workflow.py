@@ -5,14 +5,17 @@ With interrupt_before for human-in-the-loop via Agent Inbox
 """
 
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
+from langgraph.store.memory import InMemoryStore
+from langgraph.runtime import Runtime
 from langsmith import traceable
 
 from src.models.state import AgentState
+from src.models.context import RuntimeContext
 from src.agents.email_processor import EmailProcessorAgent
 from src.agents.supervisor import SupervisorAgent
 from src.agents.adaptive_writer import AdaptiveWriterAgent
@@ -21,13 +24,15 @@ from src.agents.rag_agent import RAGAgent
 from src.agents.crm_agent import CRMAgent
 from src.agents.email_sender import EmailSenderAgent
 from src.agents.router import router_node
+from src.memory.store_manager import StoreManager
+from src.memory.memory_utils import MemoryUtils
 
 import structlog
 
 logger = structlog.get_logger()
 
 
-# Global agent variables (will be initialized in create_workflow)
+# Global variables (will be initialized in create_workflow)
 email_processor_agent = None
 supervisor_agent = None
 adaptive_writer_agent = None
@@ -36,26 +41,62 @@ rag_agent = None
 crm_agent = None
 email_sender_agent = None
 
+# Memory management
+store_manager = None
+memory_utils = None
+
 
 @traceable
-async def email_processor_node(state: AgentState) -> AgentState:
-    """Process incoming email and extract context"""
+async def email_processor_node(state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> AgentState:
+    """Process incoming email and extract context with memory enrichment"""
     logger.info("📧 Email Processor Node")
-    return await email_processor_agent.ainvoke(state)
+    
+    # Enrich state with user memory if runtime context available
+    if runtime and store_manager:
+        try:
+            # Runtime contains the context data directly
+            user_id = getattr(runtime, 'user_id', 'default_user')
+            state = await memory_utils.enrich_state_with_memory(state, user_id)
+        except Exception as e:
+            logger.warning(f"Could not enrich with memory: {e}")
+    
+    return await email_processor_agent.ainvoke(state, runtime)
 
 
 @traceable
-async def supervisor_node(state: AgentState) -> AgentState:
-    """Route email based on intent classification with multi-agent support"""
-    logger.info("🧭 Supervisor Node")
-    return await supervisor_agent.ainvoke(state)
+async def supervisor_node(state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> AgentState:
+    """Analyze email and determine next action with contextual recommendations"""
+    logger.info("🔍 Supervisor Node")
+    
+    # Get contextual recommendations from memory
+    if runtime and memory_utils:
+        try:
+            user_id = getattr(runtime, 'user_id', 'default_user')
+            recommendations = await memory_utils.get_contextual_recommendations(state, user_id)
+            if recommendations:
+                state.add_insight(f"Memory recommendations: {recommendations}")
+        except Exception as e:
+            logger.warning(f"Could not get memory recommendations: {e}")
+    
+    return await supervisor_agent.ainvoke(state, runtime)
 
 
 @traceable
-async def adaptive_writer_node(state: AgentState) -> AgentState:
+async def adaptive_writer_node(state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> AgentState:
     """Generate draft response (this will be interrupted for human review)"""
     logger.info("✍️ Adaptive Writer Node")
-    return await adaptive_writer_agent.ainvoke(state)
+    
+    result = await adaptive_writer_agent.ainvoke(state, runtime)
+    
+    # Extract insights from interaction for learning
+    if runtime and memory_utils:
+        try:
+            user_id = getattr(runtime, 'user_id', 'default_user')
+            await memory_utils.extract_insights_from_email(result, user_id)
+        except Exception as e:
+            logger.warning(f"Could not extract insights: {e}")
+    
+    return result
 
 
 @traceable
@@ -88,98 +129,132 @@ async def human_review_node(state: AgentState) -> AgentState:
         # Truncate subject if too long for UI display
         subject_short = state.email.subject[:50] + "..." if len(state.email.subject) > 50 else state.email.subject
         sender_name = state.email.sender.split('<')[0].strip() if '<' in state.email.sender else state.email.sender
-        action_name = f"📧 {sender_name}: {subject_short}"
-        description_text = f"Review draft response for email from {sender_name} - {subject_short}"
+        action_name = f"📧 Review: {subject_short}"
+        description_text = f"Review draft response for email from {sender_name}"
     else:
-        action_name = "📧 Email review (Unknown sender)"
-        description_text = "Review draft response for email from Unknown sender"
+        action_name = "📧 Review Email Draft"
+        description_text = "Review draft response for email"
 
-    # Dynamic interrupt using Agent Inbox expected structure
+    # Build detailed review information (matching working calendar booking pattern)
+    review_details = f"""📧 Email Response Review Required
+
+Original Email:
+• From: {state.email.sender if state.email else 'Unknown'}
+• Subject: {state.email.subject if state.email else 'Unknown'}
+• Received: {date_received}
+
+Draft Response:
+{state.draft_response or 'No draft response available'}
+
+Status: ✅ Draft response is ready to send
+
+Would you like to proceed with sending this email response?"""
+
+    # Create the interrupt for human review (EXACT MATCH of working calendar booking pattern)
     human_response = interrupt({
         "action_request": {
-            "action": action_name,  # Now shows sender and subject instead of generic "review_email_draft"
+            "action": action_name,
             "args": {
+                "review_details": review_details,
+                "message": "Please approve or reject this email response",
                 "draft_response": state.draft_response,
-                "email_context": email_context_str,  # Now contains full email body and received date
-                "message": "Please review the draft response and choose an action"
+                "email_context": email_context_str
             }
         },
         "config": {
-            "allow_accept": True,
-            "allow_ignore": True,
-            "allow_respond": True,  # This allows providing instructions
-            "allow_edit": True      # This allows editing the draft directly
+            "allow_accept": True,   # Sends the email
+            "allow_ignore": True,   # Cancels sending
+            "allow_respond": True,  # Future: Allow modifications
+            "timeout": 300          # 5 minute timeout
         },
-        "description": description_text  # More descriptive description
+        "description": description_text
     })
 
-    # Process human response when workflow is resumed
-    if human_response:
-        # Handle case where response might be a list (Agent Inbox can return updates as a list)
-        if isinstance(human_response, list):
-            # Take the last response if it's a list of updates
-            human_response = human_response[-1] if human_response else None
+    # Process the human response (using EXACT working pattern from calendar booking)
+    email_approved = _process_human_email_response(human_response, state)
+    state.response_metadata["email_approved"] = email_approved
 
-        if human_response and isinstance(human_response, dict):
-            # Agent Inbox returns response in format: {"type": "accept|ignore|response|edit", "args": ...}
-            response_type = human_response.get("type", "ignore")
-            response_args = human_response.get("args")
-
-            # Map Agent Inbox response types to our workflow decisions
-            if response_type == "accept":
-                state.response_metadata["decision"] = "accept"
-                logger.info("✅ Human accepted the draft")
-            elif response_type == "ignore":
-                state.response_metadata["decision"] = "ignore"
-                logger.info("🚫 Human ignored the draft")
-            elif response_type in ["response", "edit"]:
-                state.response_metadata["decision"] = "instruction"
-                # Extract feedback from args
-                if response_args:
-                    if isinstance(response_args, str):
-                        state.human_feedback = response_args
-                    elif isinstance(response_args, dict):
-                        # For edit type, args might contain the edited draft
-                        state.human_feedback = response_args.get("args", {}).get("draft_response", "")
-                        state.draft_response = state.human_feedback  # Update draft with edited version
-                logger.info(f"✏️ Human provided instructions: {response_type}")
-
-            state.add_message("human", f"Decision: {state.response_metadata.get('decision', 'unknown')}")
-        else:
-            # Default to ignore if response format is unexpected
-            state.response_metadata["decision"] = "ignore"
-            logger.warning(f"Unexpected human response format: {type(human_response)}")
+    if email_approved:
+        logger.info("✅ Human APPROVED sending the email")
+        state.response_metadata["decision"] = "accept"
     else:
-        # Default to ignore if no response
+        logger.info("❌ Human REJECTED sending the email")
         state.response_metadata["decision"] = "ignore"
-        logger.info("⚠️ No human response received, defaulting to ignore")
 
     return state
 
 
-def create_workflow() -> StateGraph:
+def _process_human_email_response(human_response: Any, state: AgentState) -> bool:
     """
-    Create full workflow with all agents + human interrupt + router
+    Process the human response from the interrupt.
+    Returns True if email sending is approved, False otherwise.
+    (EXACT COPY of working _process_human_booking_response pattern)
+    """
+    # Handle list responses (Agent Inbox can return updates as a list)
+    if isinstance(human_response, list):
+        human_response = human_response[-1] if human_response else None
+
+    if not human_response:
+        logger.warning("No human response received - defaulting to reject")
+        return False
+
+    if isinstance(human_response, dict):
+        response_type = human_response.get("type", "ignore")
+
+        if response_type == "accept":
+            return True
+        elif response_type == "ignore":
+            return False
+        elif response_type in ["response", "edit"]:
+            # Future enhancement: Handle modifications
+            response_args = human_response.get("args", {})
+            if response_args:
+                state.human_feedback = (
+                    response_args if isinstance(response_args, str)
+                    else response_args.get("feedback", "")
+                )
+                logger.info(f"Human provided modifications: {state.human_feedback}")
+            return False  # For now, treat modifications as rejection
+        else:
+            logger.warning(f"Unknown response type: {response_type}")
+            return False
+    else:
+        logger.warning(f"Unexpected response format: {type(human_response)}")
+        return False
+
+
+def create_workflow(store: Optional[InMemoryStore] = None) -> StateGraph:
+    """
+    Create full workflow with all agents + human interrupt + router + persistence
     Flow: email_processor -> supervisor -> (calendar/rag/crm) -> adaptive_writer -> human_review -> router
     """
     global email_processor_agent, supervisor_agent, adaptive_writer_agent
-    global rag_agent, crm_agent, email_sender_agent  # Removed calendar_agent from globals
+    global calendar_agent, rag_agent, crm_agent, email_sender_agent
+    global store_manager, memory_utils
 
-    logger.info("🚀 Creating Agent Inbox Phase 2 Workflow with Multi-Agent Support...")
+    logger.info("🚀 Creating Enhanced Agent Inbox Workflow with Memory")
 
-    # Initialize all agents
+    # Initialize memory system
+    if store is None:
+        store = InMemoryStore()
+    store_manager = StoreManager(store)
+    memory_utils = MemoryUtils(store_manager)
+
+    # Initialize agents
     email_processor_agent = EmailProcessorAgent()
     supervisor_agent = SupervisorAgent()
     adaptive_writer_agent = AdaptiveWriterAgent()
-    email_sender_agent = EmailSenderAgent()
-    # REMOVED: calendar_agent = CalendarAgent()
+    
+    # Initialize other agents (not used in MVP but needed for full workflow)
+    calendar_agent = None  # create_calendar_subgraph()  # TODO: Implement
     rag_agent = RAGAgent()
     crm_agent = CRMAgent()
+    email_sender_agent = EmailSenderAgent()
 
     # Create the calendar subgraph
     calendar_subgraph = create_calendar_subgraph()  # <-- NEW LINE
 
-    # Create workflow with AgentState
+    # Create workflow with modern LangGraph pattern - using AgentState as Pydantic schema
     workflow = StateGraph(AgentState)
 
     # Add all nodes
@@ -222,9 +297,38 @@ def create_workflow() -> StateGraph:
 
     # Add conditional routing from supervisor to specialized agents or adaptive_writer
     def route_from_supervisor(state: AgentState) -> str:
-        """Determine next node based on supervisor's routing decision"""
+        """Determine next node based on supervisor's routing decision with completion checks"""
         routing = state.response_metadata.get("routing", {})
         next_agent = routing.get("next", "adaptive_writer")
+        completed_agents = routing.get("completed_agents", [])
+
+        # CRITICAL: Override supervisor decision ONLY if no human feedback AND work is complete
+        # Check if calendar agent already completed successfully BUT respect human feedback
+        has_human_feedback = (
+            state.human_feedback or
+            state.response_metadata.get("human_feedback") or
+            "HUMAN FEEDBACK FROM AGENT INBOX" in str(state.messages[-3:]) if state.messages else False
+        )
+
+        if (next_agent == "calendar_agent" and
+            "calendar_agent" in completed_agents and
+            state.calendar_data and
+            state.calendar_data.action_taken and
+            ("successfully" in state.calendar_data.action_taken.lower() or
+             "meeting_booked" in state.calendar_data.action_taken.lower() or
+             "event has been created" in state.calendar_data.action_taken.lower()) and
+            not has_human_feedback):  # ← ONLY override if NO human feedback
+
+            logger.info("🛑 OVERRIDE: Calendar work already complete, forcing route to adaptive_writer")
+            next_agent = "adaptive_writer"
+            # Update routing to reflect override
+            routing["next"] = "adaptive_writer"
+            routing["override_reason"] = "Calendar agent already completed successfully"
+            state.response_metadata["routing"] = routing
+        elif has_human_feedback and next_agent == "calendar_agent":
+            logger.info("👤 HUMAN FEEDBACK DETECTED: Respecting supervisor's calendar_agent routing decision")
+            routing["override_reason"] = "Human feedback requires calendar modification"
+            state.response_metadata["routing"] = routing
 
         # Track which agent we're routing to for completion detection
         if next_agent in ["calendar_agent", "rag_agent", "crm_agent"]:
@@ -270,11 +374,63 @@ def create_workflow() -> StateGraph:
     workflow.add_edge("send_email", END)
 
     # CRITICAL: Using dynamic interrupts in human_review_node for Agent Inbox
-    # Note: In langgraph API mode, persistence is handled automatically
-    logger.info("🔧 Compiling workflow with action-based human review")
+    # MODERN: LangGraph API handles persistence automatically
+    logger.info("🔧 Compiling workflow for LangGraph API compatibility")
 
-    app = workflow.compile()
+    # Conditional store usage: detect if running in LangGraph API context
+    import os
+    import sys
+    
+    # Check if we're running via LangGraph API by looking for specific indicators
+    is_langgraph_api = (
+        "langgraph" in " ".join(sys.argv) or 
+        os.getenv("LANGGRAPH_API_MODE") == "true" or
+        "langgraph_api" in str(sys.modules.keys())
+    )
+    
+    if is_langgraph_api:
+        logger.info("☁️ Detected LangGraph API context - using built-in persistence")
+        app = workflow.compile()
+    else:
+        logger.info("📝 Local development context - using custom InMemoryStore")
+        app = workflow.compile(store=store)
 
-    logger.info("✅ Phase 2 Workflow compiled successfully with multi-agent support")
+    logger.info("✅ Enhanced Workflow compiled successfully with:")
+    logger.info("    - Multi-agent support with memory integration")
+    logger.info("    - Long-term memory stores")
+    logger.info("    - API-managed persistence")
+    logger.info("    - Built-in time travel debugging")
+    logger.info("    - Fault tolerance with checkpoint recovery")
+    logger.info("    - Thread-based memory management")
 
     return app
+
+
+def create_runtime_context(
+    user_id: str,
+    user_email: str,
+    preferences: Optional[Dict[str, Any]] = None
+) -> RuntimeContext:
+    """
+    Create runtime context for workflow invocation with user context
+    
+    Args:
+        user_id: User identifier
+        user_email: User email address
+        preferences: User preferences
+        
+    Returns:
+        Runtime context for agent execution
+    """
+    if memory_utils:
+        return memory_utils.create_runtime_context(user_id, user_email, preferences)
+    
+    # Fallback if memory_utils not initialized
+    return RuntimeContext(
+        user_id=user_id,
+        user_email=user_email,
+        user_preferences=preferences or {},
+        available_tools=["gmail", "calendar", "documents", "contacts"],
+        timezone="UTC",
+        language="en"
+    )

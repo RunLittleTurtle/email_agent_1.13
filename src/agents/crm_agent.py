@@ -13,8 +13,10 @@ from googleapiclient.errors import HttpError
 from src.utils.google_auth import GoogleAuthHelper
 
 from langsmith import traceable
+from langgraph.runtime import Runtime
 from src.agents.base_agent import BaseAgent
 from src.models.state import AgentState, ContactData
+from src.models.context import RuntimeContext
 
 
 class CRMAgent(BaseAgent):
@@ -53,7 +55,7 @@ class CRMAgent(BaseAgent):
             self.service = GoogleAuthHelper.create_mock_service('people', 'v1')
     
     @traceable(name="crm_process", tags=["agent", "crm"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> Dict[str, Any]:
         """
         Process CRM-related requests and task delegation
         """
@@ -64,8 +66,7 @@ class CRMAgent(BaseAgent):
             crm_request = await self._extract_crm_request(state)
             
             # Initialize contact data if not exists
-            if not state.contact_data:
-                state.contact_data = ContactData()
+            contact_data = state.contact_data or ContactData()
             
             # Look up contacts mentioned in the email
             contacts = []
@@ -82,8 +83,8 @@ class CRMAgent(BaseAgent):
                 else:
                     unknown_contacts.append(contact_query)
             
-            state.contact_data.contacts = contacts
-            state.contact_data.unknown_contacts = unknown_contacts
+            contact_data.contacts = contacts
+            contact_data.unknown_contacts = unknown_contacts
             
             # Process task delegation if needed
             if crm_request.get("is_task_delegation"):
@@ -91,28 +92,31 @@ class CRMAgent(BaseAgent):
                     crm_request,
                     contacts
                 )
-                state.contact_data.relationship_context = delegation_context
+                contact_data.relationship_context = delegation_context
             
             # Generate CRM summary
-            crm_summary = self._generate_crm_summary(state.contact_data, crm_request)
+            crm_summary = self._generate_crm_summary(contact_data, crm_request)
             
-            # Add summary message
-            self._add_message(
-                state,
+            # Create AI message with CRM results
+            crm_message = self.create_ai_message(
                 crm_summary,
                 metadata={
-                    "contact_data": state.contact_data.dict(),
+                    "contact_data": contact_data.dict(),
                     "contacts_found": len(contacts),
                     "task_delegation": crm_request.get("is_task_delegation", False)
                 }
             )
             
-            return state
+            return {
+                "messages": [crm_message],
+                "contact_data": contact_data
+            }
             
         except Exception as e:
             self.logger.error(f"CRM agent failed: {str(e)}")
-            state.add_error(f"CRM processing failed: {str(e)}")
-            return state
+            return {
+                "error_messages": [f"CRM processing failed: {str(e)}"]
+            }
     
     async def _extract_crm_request(self, state: AgentState) -> Dict[str, Any]:
         """Extract CRM-related information from email using LLM"""

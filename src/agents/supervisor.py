@@ -27,7 +27,7 @@ class SupervisorAgent(BaseAgent):
         )
 
     @traceable(name="supervisor_process", tags=["agent", "supervisor"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime=None) -> Dict[str, Any]:
         """
         Analyze email_processor output for intelligent routing decisions.
         Track execution state and ensure proper agent sequencing.
@@ -48,7 +48,7 @@ class SupervisorAgent(BaseAgent):
         # Check progress and route to next agent
         return self._check_and_route_next(state)
 
-    async def _analyze_and_route(self, state: AgentState) -> AgentState:
+    async def _analyze_and_route(self, state: AgentState) -> Dict[str, Any]:
         """Analyze email_processor output for comprehensive routing decision."""
         try:
             if not state.email or not state.extracted_context:
@@ -186,14 +186,17 @@ Return JSON:
                     for agent in execution_order[:-1]  # Exclude adaptive_writer from task list
                 ]
 
-                self._add_message(
-                    state,
+                # Create routing message with modern pattern
+                routing_message = self.create_ai_message(
                     f"Routing plan: {' → '.join(execution_order)}. "
                     f"Tasks: {'; '.join(agent_tasks) if agent_tasks else 'Direct response'}",
                     metadata=decision
                 )
 
-                return state
+                return {
+                    "messages": [routing_message],
+                    "response_metadata": {"routing": state.response_metadata["routing"]}
+                }
 
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse routing decision: {e}")
@@ -226,13 +229,13 @@ Return JSON:
             (any(has_agent_output) or state.status == "processing")
         )
 
-    def _update_agent_progress(self, state: AgentState) -> AgentState:
+    def _update_agent_progress(self, state: AgentState) -> Dict[str, Any]:
         """Update progress after agent completes."""
         routing = state.response_metadata["routing"]
         last_agent = routing.get("last_routed_to")
 
         if not last_agent:
-            return state
+            return {}
 
         self.logger.info(f"Agent {last_agent} completed execution")
 
@@ -274,23 +277,26 @@ Return JSON:
             )
         else:
             routing["next"] = "END"
-            state.status = "ready_for_response"
             self.logger.info("All agents completed, ready for final response")
+            return {
+                "response_metadata": {"routing": routing},
+                "status": "ready_for_response"
+            }
 
-        state.response_metadata["routing"] = routing
-        return state
+        return {
+            "response_metadata": {"routing": routing}
+        }
 
-    def _check_and_route_next(self, state: AgentState) -> AgentState:
+    def _check_and_route_next(self, state: AgentState) -> Dict[str, Any]:
         """Determine next step in execution flow."""
         routing = state.response_metadata["routing"]
         next_agent = routing.get("next")
 
         if next_agent and next_agent != "END":
             self.logger.info(f"Continuing to: {next_agent}")
+            return {}
         else:
-            state.status = "completed"
-
-        return state
+            return {"status": "completed"}
 
     def _has_feedback(self, state: AgentState) -> bool:
         """Check for human feedback."""
@@ -300,7 +306,7 @@ Return JSON:
             state.response_metadata.get("decision") == "instruction"
         )
 
-    def _handle_feedback_refinement(self, state: AgentState) -> AgentState:
+    def _handle_feedback_refinement(self, state: AgentState) -> Dict[str, Any]:
         """Route feedback to adaptive_writer."""
         self.logger.info("Processing human feedback")
 
@@ -311,14 +317,14 @@ Return JSON:
             historical = state.response_metadata["human_feedback"]
             feedback_list.extend(historical if isinstance(historical, list) else [historical])
 
-        state.response_metadata["feedback_context"] = {
+        feedback_context = {
             "feedback_count": len(feedback_list),
             "all_feedback": feedback_list,
             "refinement_iteration": state.response_metadata.get("refinement_iteration", 0) + 1,
             "previous_draft": state.draft_response
         }
 
-        state.response_metadata["routing"] = {
+        routing = {
             "execution_order": ["adaptive_writer"],
             "next": "adaptive_writer",
             "last_routed_to": "adaptive_writer",
@@ -326,18 +332,25 @@ Return JSON:
             "completed_agents": []
         }
 
-        return state
+        return {
+            "response_metadata": {
+                "feedback_context": feedback_context,
+                "routing": routing
+            }
+        }
 
-    def _route_to_adaptive_writer(self, state: AgentState, reason: str) -> AgentState:
+    def _route_to_adaptive_writer(self, state: AgentState, reason: str) -> Dict[str, Any]:
         """Direct route to adaptive_writer."""
-        state.response_metadata["routing"] = {
+        routing = {
             "execution_order": ["adaptive_writer"],
             "next": "adaptive_writer",
             "last_routed_to": "adaptive_writer",
             "completed_agents": [],
             "rationale": reason
         }
-        return state
+        return {
+            "response_metadata": {"routing": routing}
+        }
 
     def get_next_agents(self, state: AgentState) -> List[str]:
         """Return next agent(s) to execute."""

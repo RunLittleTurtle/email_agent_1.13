@@ -7,13 +7,17 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import logging
 from datetime import datetime
+import time
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import AIMessage
 from langsmith import traceable
+from langgraph.runtime import Runtime
 import structlog
 
-from src.models.state import AgentState
+from src.models.state import AgentState, AgentOutput
+from src.models.context import RuntimeContext
 
 
 class BaseAgent(ABC):
@@ -62,49 +66,75 @@ class BaseAgent(ABC):
         self.logger = structlog.get_logger().bind(agent=name)
 
     @abstractmethod
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> Dict[str, Any]:
         """
-        Process the current state and return updated state.
+        Process the current state and return state updates (LangGraph 0.6+ pattern).
         This must be implemented by each specific agent.
 
         Args:
             state: Current workflow state
+            runtime: Runtime context with user preferences, tools, etc.
 
         Returns:
-            Updated workflow state
+            Dictionary with state updates (messages, output, etc.)
         """
         pass
 
     @traceable(name="agent_invoke", tags=["agent"])
-    async def ainvoke(self, state: AgentState) -> AgentState:
+    async def ainvoke(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> AgentState:
         """
-        Invoke the agent with error handling and logging.
+        Modern LangGraph 0.6+ invoke pattern with context support.
         This wraps the process method with common functionality.
 
         Args:
             state: Current workflow state
+            runtime: Runtime context with user preferences, tools, etc.
 
         Returns:
             Updated workflow state
         """
-        start_time = datetime.now()
+        start_time = time.time()
         self.logger.info(f"Starting {self.name} processing")
 
         try:
-            # Update current agent
+            # Update current agent and execution context
             state.current_agent = self.name
-
-            # Process state
-            updated_state = await self.process(state)
-
-            # Log success
-            duration = (datetime.now() - start_time).total_seconds()
-            self.logger.info(
-                f"{self.name} completed successfully",
-                duration=duration
+            state.update_dynamic_context(
+                execution_step=state.dynamic_context.execution_step + 1,
+                current_phase=f"{self.name}_processing"
             )
 
-            return updated_state
+            # Process state and get updates
+            updates = await self.process(state, runtime)
+            
+            # Apply updates to state
+            for key, value in updates.items():
+                if key == "messages" and isinstance(value, list):
+                    # LangGraph will handle message merging via add_messages reducer
+                    state.messages.extend(value)
+                elif hasattr(state, key):
+                    setattr(state, key, value)
+
+            # Calculate execution time
+            execution_time = time.time() - start_time
+            
+            # Create rich agent output
+            state.add_agent_output(
+                agent=self.name,
+                message=f"{self.name} completed successfully",
+                confidence=0.9,
+                execution_time=execution_time,
+                data={"updates_applied": list(updates.keys())}
+            )
+
+            # Log success
+            self.logger.info(
+                f"{self.name} completed successfully",
+                duration=execution_time,
+                updates=list(updates.keys())
+            )
+
+            return state
 
         except Exception as e:
             # Log error
@@ -114,29 +144,33 @@ class BaseAgent(ABC):
                 exc_info=True
             )
 
-            # Update state with error
+            # Add error to state with rich context
             state.add_error(f"{self.name} failed: {str(e)}")
+            state.add_agent_output(
+                agent=self.name,
+                message=f"{self.name} failed: {str(e)}",
+                confidence=0.0,
+                execution_time=time.time() - start_time,
+                errors=[str(e)]
+            )
             return state
 
-    def _add_message(
-        self,
-        state: AgentState,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ):
+    def create_ai_message(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> AIMessage:
         """
-        Helper method to add a message to state
+        Modern helper to create AI messages for LangGraph 0.6+ pattern
+        Returns message for inclusion in state updates
 
         Args:
-            state: Current state
             content: Message content
             metadata: Optional metadata
+
+        Returns:
+            AIMessage for state updates
         """
-        state.add_message(
-            role=self.name,
-            content=content,
-            metadata=metadata
-        )
+        message = AIMessage(content=content, name=self.name)
+        if metadata:
+            message.additional_kwargs.update(metadata)
+        return message
 
     async def _call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """

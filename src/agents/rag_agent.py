@@ -16,8 +16,10 @@ from googleapiclient.http import MediaIoBaseDownload
 import pickle
 
 from langsmith import traceable
+from langgraph.runtime import Runtime
 from src.agents.base_agent import BaseAgent
 from src.models.state import AgentState, DocumentData
+from src.models.context import RuntimeContext
 
 
 class RAGAgent(BaseAgent):
@@ -56,7 +58,7 @@ class RAGAgent(BaseAgent):
             self.service = GoogleAuthHelper.create_mock_service('drive', 'v3')
     
     @traceable(name="rag_process", tags=["agent", "rag"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> Dict[str, Any]:
         """
         Process document requests and information retrieval
         """
@@ -67,10 +69,8 @@ class RAGAgent(BaseAgent):
             search_queries = await self._extract_search_queries(state)
             
             # Initialize document data if not exists
-            if not state.document_data:
-                state.document_data = DocumentData()
-            
-            state.document_data.search_queries = search_queries
+            document_data = state.document_data or DocumentData()
+            document_data.search_queries = search_queries
             
             # Search for documents
             all_found_documents = []
@@ -91,29 +91,34 @@ class RAGAgent(BaseAgent):
                 else:
                     missing_queries.append(query)
             
-            state.document_data.found_documents = all_found_documents
-            state.document_data.missing_documents = missing_queries
+            document_data.found_documents = all_found_documents
+            document_data.missing_documents = missing_queries
             
-            # Generate RAG summary
-            rag_summary = await self._generate_rag_response(state)
+            # Generate RAG summary with temporary state for response generation
+            temp_state = state.copy()
+            temp_state.document_data = document_data
+            rag_summary = await self._generate_rag_response(temp_state)
             
-            # Add summary message
-            self._add_message(
-                state,
+            # Create AI message with RAG results
+            rag_message = self.create_ai_message(
                 rag_summary,
                 metadata={
-                    "document_data": state.document_data.dict(),
+                    "document_data": document_data.dict(),
                     "documents_found": len(all_found_documents),
                     "queries_processed": len(search_queries)
                 }
             )
             
-            return state
+            return {
+                "messages": [rag_message],
+                "document_data": document_data
+            }
             
         except Exception as e:
             self.logger.error(f"RAG agent failed: {str(e)}")
-            state.add_error(f"Document retrieval failed: {str(e)}")
-            return state
+            return {
+                "error_messages": [f"Document retrieval failed: {str(e)}"]
+            }
     
     async def _extract_search_queries(self, state: AgentState) -> List[str]:
         """Extract document search queries from email using LLM"""

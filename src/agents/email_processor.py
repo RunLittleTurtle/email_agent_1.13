@@ -6,11 +6,13 @@ and extracts contextual information (entities, dates, actions, urgency).
 
 import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from langsmith import traceable
+from langgraph.runtime import Runtime
 from src.agents.base_agent import BaseAgent
 from src.models.state import AgentState, ExtractedContext
+from src.models.context import RuntimeContext
 
 
 class EmailProcessorAgent(BaseAgent):
@@ -28,7 +30,7 @@ class EmailProcessorAgent(BaseAgent):
         )
 
     @traceable(name="email_processor_process", tags=["agent", "processor"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> Dict[str, Any]:
         """
         Generate parsed + structured state for incoming email.
         LangSmith traceable.
@@ -36,8 +38,9 @@ class EmailProcessorAgent(BaseAgent):
         try:
             if not state.email:
                 self.logger.error("No email data provided to process")
-                state.add_error("No email data provided")
-                return state
+                return {
+                    "error_messages": ["No email data provided"]
+                }
 
             self.logger.info(
                 "Processing email",
@@ -112,27 +115,33 @@ Return JSON with two sections:
                     sentiment=context_data.get("sentiment", "neutral")
                 )
 
-                state.extracted_context = extracted_context
-                state.response_metadata["context_extraction"] = context_data
-
-                # Add message
-                self._add_message(
-                    state,
+                # Create AI message for processing result
+                processing_message = self.create_ai_message(
                     f"Email processed. Summary: {parsing.get('summary', 'N/A')}, "
                     f"Context: {len(extracted_context.key_entities)} entities, "
                     f"{len(extracted_context.requested_actions)} actions, urgency={extracted_context.urgency_level}",
                     metadata=parsed
                 )
 
-                state.status = "processing"
+                # Return state updates
+                return {
+                    "messages": [processing_message],
+                    "extracted_context": extracted_context,
+                    "response_metadata": {
+                        "email_parsing": parsing,
+                        "context_extraction": context_data
+                    },
+                    "status": "processing"
+                }
 
             except (json.JSONDecodeError, ValueError) as e:
                 self.logger.error(f"Failed to parse LLM response: {e}")
-                state.add_error(f"Failed to parse email/context: {str(e)}")
-
-            return state
+                return {
+                    "error_messages": [f"Failed to parse email/context: {str(e)}"]
+                }
 
         except Exception as e:
             self.logger.error(f"Email processing failed: {str(e)}", exc_info=True)
-            state.add_error(f"Email processing failed: {str(e)}")
-            return state
+            return {
+                "error_messages": [f"Email processing failed: {str(e)}"]
+            }
