@@ -216,13 +216,13 @@ Provide analysis in this JSON format:
 
 
 @traceable(name="human_feedback_processor_node", tags=["human_feedback", "node"])
-async def human_feedback_processor_node(state: Dict[str, Any]) -> Dict[str, Any]:
+async def human_feedback_processor_node(state) -> Dict[str, Any]:
     """
     Standalone node function for processing human feedback
     Can be added to any workflow where human feedback processing is needed
     """
     # Check if there's pending human feedback to process
-    pending_feedback = state.get("pending_human_feedback")
+    pending_feedback = getattr(state, "pending_human_feedback", None)
     if not pending_feedback:
         logger.info("No pending human feedback to process")
         return {}  # No feedback to process
@@ -234,10 +234,10 @@ async def human_feedback_processor_node(state: Dict[str, Any]) -> Dict[str, Any]
     context = {
         "source_node": pending_feedback.get("source_node", "unknown"),
         "action_context": pending_feedback.get("action_context", ""),
-        "original_request": state.get("email", {}).get("subject", "") if state.get("email") else "",
-        "message_history": state.get("messages", []),
-        "draft_response": state.get("draft_response", ""),
-        "extracted_context": state.get("extracted_context", {})
+        "original_request": getattr(state, "email", None).subject if getattr(state, "email", None) else "",
+        "message_history": getattr(state, "messages", []),
+        "draft_response": getattr(state, "draft_response", ""),
+        "extracted_context": getattr(state, "extracted_context", {})
     }
 
     # Process the feedback

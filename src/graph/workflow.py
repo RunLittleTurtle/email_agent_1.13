@@ -275,7 +275,7 @@ Would you like to proceed with sending this email response?"""
         },
         "description": description_text
     }
-    
+
     # Send interrupt and get response
     human_response_list = interrupt(interrupt_request)
     human_response: HumanResponse = human_response_list[0] if human_response_list else None
@@ -284,7 +284,7 @@ Would you like to proceed with sending this email response?"""
     if human_response:
         response_type = human_response.get("type", "ignore")
         response_args = human_response.get("args")
-        
+
         if response_type == "accept":
             email_approved = True
             decision = "approved"
@@ -320,11 +320,21 @@ Would you like to proceed with sending this email response?"""
     updated_response_metadata["human_response_type"] = human_response.get("type") if human_response else None
     updated_response_metadata["agent_inbox_compatible"] = True
 
+    # Format feedback for human_feedback_processor using the helper function
+    from src.agents.human_feedback_processor import format_feedback_for_processing
+
+    pending_feedback = format_feedback_for_processing(
+        human_response,
+        source_node="human_review",
+        action_context=f"Email response review for: {email.subject if email else 'Unknown'}"
+    )
+
     # Prepare return with Agent Inbox response
     result_updates = {
-        "response_metadata": updated_response_metadata
+        "response_metadata": updated_response_metadata,
+        "pending_human_feedback": pending_feedback
     }
-    
+
     # Add human response details if available
     if human_response and human_response.get("args"):
         result_updates["human_feedback"] = human_response["args"]
@@ -364,6 +374,7 @@ def create_workflow(store: Optional[InMemoryStore] = None):
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("adaptive_writer", adaptive_writer_node)
     workflow.add_node("human_review", human_review_node)
+    workflow.add_node("human_feedback_processor", human_feedback_processor_node)
     workflow.add_node("router", router_node)
 
     # Add specialized agent nodes with traceable wrappers
@@ -454,7 +465,8 @@ def create_workflow(store: Optional[InMemoryStore] = None):
 
     # adaptive_writer flows directly to human_review - bypass supervisor
     workflow.add_edge("adaptive_writer", "human_review")
-    workflow.add_edge("human_review", "router")
+    workflow.add_edge("human_review", "human_feedback_processor")
+    workflow.add_edge("human_feedback_processor", "router")
 
     # Router conditional edges
     workflow.add_conditional_edges(

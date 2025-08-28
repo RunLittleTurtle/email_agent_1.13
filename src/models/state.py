@@ -210,6 +210,10 @@ class AgentState(BaseModel):
     current_agent: Optional[str] = None
     status: Literal["processing", "approved", "rejected", "error"] = "processing"
     human_feedback: Optional[str] = None
+    pending_human_feedback: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Pending human feedback data to be processed by human_feedback_processor"
+    )
     error_messages: Annotated[List[str], operator.add] = Field(
         default_factory=list,
         description="Error messages that can be added by multiple agents concurrently"

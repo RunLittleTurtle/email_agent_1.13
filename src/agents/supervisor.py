@@ -391,17 +391,31 @@ def get_next_agent_from_state(state: AgentState) -> str:
     logger.info(f"🔍 DEBUG: routing keys: {list(routing.keys())}")
     logger.info(f"🔍 DEBUG: full routing object: {routing}")
 
-    next_agent = routing.get("next", "END")
+    next_agent = routing.get("next")
     logger.info(f"🔍 DEBUG: raw next_agent value: {next_agent}")
+
+    # Handle None case explicitly - always return a valid route
+    if next_agent is None:
+        logger.warning("❌ DEBUG: next_agent is None - defaulting to adaptive_writer")
+        next_agent = "adaptive_writer"
 
     # Check if supervisor actually made a routing decision
     if routing.get("supervisor_routed"):
         logger.info(f"✅ DEBUG: Supervisor routing confirmed with reasoning: {routing.get('reasoning', 'no reasoning')}")
     else:
-        logger.warning("❌ DEBUG: No supervisor routing found - this might be the problem!")
+        logger.warning("❌ DEBUG: No supervisor routing found - defaulting to adaptive_writer")
         logger.warning(f"❌ DEBUG: Available metadata: {list(response_metadata.keys())}")
+        # If no supervisor routing, default to adaptive_writer to continue workflow
+        next_agent = "adaptive_writer"
 
+    # Convert FINISH to END for workflow compatibility
     final_result = next_agent if next_agent != "FINISH" else "END"
+    
+    # Ensure we never return None - final safety check
+    if final_result is None or final_result == "":
+        logger.error("❌ CRITICAL: final_result is None/empty - forcing adaptive_writer")
+        final_result = "adaptive_writer"
+    
     logger.info(f"📍 Final routing result: {final_result}")
 
     return final_result
