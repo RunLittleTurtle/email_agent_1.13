@@ -3,6 +3,7 @@ State models for Ambient Email Agent
 Defines the shared state structure for all agents in the LangGraph workflow
 """
 
+import operator
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Dict, Any, Literal, Sequence, Annotated
@@ -11,6 +12,61 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 from .context import DynamicContext, LongTermMemory
+
+
+def merge_dynamic_context(left, right) -> DynamicContext:
+    """
+    Custom reducer for DynamicContext that safely merges updates
+    from multiple agents updating concurrently
+    """
+    if left is None:
+        left = DynamicContext()
+    if right is None:
+        return left
+
+    # Handle dict updates from helper methods
+    if isinstance(right, dict):
+        # Create a new context with merged data
+        merged_insights = list(left.accumulated_insights)
+        if "accumulated_insights" in right:
+            new_insights = right["accumulated_insights"]
+            if isinstance(new_insights, list):
+                merged_insights.extend(new_insights)
+            else:
+                merged_insights.append(new_insights)
+
+        # Merge metadata
+        merged_metadata = {**left.execution_metadata}
+        if "execution_metadata" in right:
+            merged_metadata.update(right["execution_metadata"])
+
+        # Create updated context
+        return DynamicContext(
+            execution_step=right.get("execution_step", left.execution_step),
+            current_phase=right.get("current_phase", left.current_phase),
+            accumulated_insights=merged_insights,
+            execution_metadata=merged_metadata,
+            performance_metrics={**left.performance_metrics, **right.get("performance_metrics", {})}
+        )
+
+    # Handle DynamicContext object merging
+    if isinstance(right, DynamicContext):
+        merged_insights = list(left.accumulated_insights)
+        for insight in right.accumulated_insights:
+            if insight not in merged_insights:
+                merged_insights.append(insight)
+
+        return DynamicContext(
+            execution_step=max(left.execution_step, right.execution_step),
+            current_phase=right.current_phase,
+            accumulated_insights=merged_insights,
+            execution_metadata={**left.execution_metadata, **right.execution_metadata},
+            performance_metrics={**left.performance_metrics, **right.performance_metrics}
+        )
+
+    return left
+
+
 
 
 class EmailIntent(str, Enum):
@@ -93,18 +149,18 @@ class AgentOutput(BaseModel):
     message: str = Field(description="Human-readable summary of agent's work")
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence score for the results")
     execution_time_seconds: Optional[float] = Field(None, description="Time taken for agent execution")
-    
+
     # Detailed results and metadata
     data: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Structured data produced by agent")
     tools_used: List[str] = Field(default_factory=list, description="Tools/APIs called during execution")
     errors: List[str] = Field(default_factory=list, description="Any errors encountered")
     warnings: List[str] = Field(default_factory=list, description="Any warnings or issues")
-    
+
     # Context and state awareness
     input_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Input context when agent started")
     state_changes: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Changes made to state")
     next_recommendations: List[str] = Field(default_factory=list, description="Recommended next steps")
-    
+
     class Config:
         arbitrary_types_allowed = True
         json_encoders = {
@@ -113,10 +169,7 @@ class AgentOutput(BaseModel):
 
 
 class AgentState(BaseModel):
-    """
-    Shared state for all agents in the workflow.
-    This is the central state object that gets passed between agents.
-    """
+    """Shared state for all agents in the LangGraph workflow"""
     # Core state - LangGraph native message handling
     messages: Annotated[Sequence[AnyMessage], add_messages] = Field(
         default_factory=list,
@@ -134,16 +187,19 @@ class AgentState(BaseModel):
 
     # Response generation
     draft_response: Optional[str] = None
-    response_metadata: Dict[str, Any] = Field(default_factory=dict)
-    output: List[AgentOutput] = Field(
+    response_metadata: Annotated[Dict[str, Any], operator.or_] = Field(
+        default_factory=dict,
+        description="Response metadata that can be updated by multiple agents"
+    )
+    output: Annotated[List[AgentOutput], operator.add] = Field(
         default_factory=list,
         description="Rich agent output with execution details and context"
     )
 
     # Modern LangGraph 0.6+ Context Management
-    dynamic_context: DynamicContext = Field(
+    dynamic_context: Annotated[DynamicContext, merge_dynamic_context] = Field(
         default_factory=DynamicContext,
-        description="Evolving execution context and accumulated insights"
+        description="Evolving execution context with concurrent merge support"
     )
     long_term_memory: Optional[LongTermMemory] = Field(
         None,
@@ -154,38 +210,41 @@ class AgentState(BaseModel):
     current_agent: Optional[str] = None
     status: Literal["processing", "approved", "rejected", "error"] = "processing"
     human_feedback: Optional[str] = None
-    error_messages: List[str] = Field(default_factory=list)
+    error_messages: Annotated[List[str], operator.add] = Field(
+        default_factory=list,
+        description="Error messages that can be added by multiple agents concurrently"
+    )
 
     # Tracking
     workflow_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
-    def add_ai_message(self, content: str, metadata: Optional[Dict[str, Any]] = None):
-        """Helper method to create an AI message (use sparingly - prefer LangGraph's add_messages)"""
-        from langchain_core.messages import AIMessage
-        message = AIMessage(content=content)
-        if metadata:
-            message.additional_kwargs.update(metadata)
-        # Note: State updates should use return {"messages": [message]} in nodes
-        self.updated_at = datetime.now()
-        return message
 
-    def add_human_message(self, content: str, metadata: Optional[Dict[str, Any]] = None):
-        """Helper method to create a human message (use sparingly - prefer LangGraph's add_messages)"""
-        from langchain_core.messages import HumanMessage
-        message = HumanMessage(content=content)
-        if metadata:
-            message.additional_kwargs.update(metadata)
-        # Note: State updates should use return {"messages": [message]} in nodes
-        self.updated_at = datetime.now()
-        return message
 
-    def add_error(self, error: str):
-        """Helper method to add an error message"""
-        self.error_messages.append(f"[{self.current_agent or 'unknown'}] {error}")
-        self.status = "error"
-        self.updated_at = datetime.now()
+    def add_error(self, error: str) -> Dict[str, Any]:
+        """Helper method to create error state updates for reducers"""
+        return {
+            "error_messages": [f"[{self.current_agent or 'unknown'}] {error}"],
+            "status": "error",
+            "updated_at": datetime.now()
+        }
+
+    def update_dynamic_context(self, **updates) -> Dict[str, Any]:
+        """Create dynamic context updates for reducers"""
+        return {
+            "dynamic_context": updates,
+            "updated_at": datetime.now()
+        }
+
+    def add_insight(self, insight: str) -> Dict[str, Any]:
+        """Create insight updates for reducers"""
+        return {
+            "dynamic_context": {
+                "accumulated_insights": [insight]
+            },
+            "updated_at": datetime.now()
+        }
 
     def add_agent_output(
         self,
@@ -196,11 +255,8 @@ class AgentState(BaseModel):
         data: Optional[Dict[str, Any]] = None,
         tools_used: Optional[List[str]] = None,
         **kwargs
-    ):
-        """
-        Modern helper to add structured agent output
-        Replaces old add_message pattern with rich output structure
-        """
+    ) -> Dict[str, Any]:
+        """Helper to create agent output updates for reducers"""
         output = AgentOutput(
             agent=agent,
             message=message,
@@ -210,21 +266,10 @@ class AgentState(BaseModel):
             tools_used=tools_used or [],
             **kwargs
         )
-        self.output.append(output)
-        self.updated_at = datetime.now()
-        return output
-
-    def update_dynamic_context(self, **updates):
-        """Update the dynamic execution context"""
-        for key, value in updates.items():
-            if hasattr(self.dynamic_context, key):
-                setattr(self.dynamic_context, key, value)
-        self.updated_at = datetime.now()
-
-    def add_insight(self, insight: str):
-        """Add an insight to the accumulated insights"""
-        self.dynamic_context.accumulated_insights.append(insight)
-        self.updated_at = datetime.now()
+        return {
+            "output": [output],
+            "updated_at": datetime.now()
+        }
 
     class Config:
         """Pydantic configuration"""

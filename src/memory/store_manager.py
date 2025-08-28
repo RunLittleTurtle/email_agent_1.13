@@ -8,7 +8,9 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 import structlog
 from langgraph.store.memory import InMemoryStore
+from langgraph.store.base import BaseStore
 from langgraph.runtime import get_runtime
+from typing import Union
 
 from src.models.context import LongTermMemory, RuntimeContext
 
@@ -18,10 +20,10 @@ logger = structlog.get_logger()
 class StoreManager:
     """
     Manages long-term memory across conversations using LangGraph stores
-    Handles user profiles, preferences, and interaction history
+    Handles user profiles, preferences, and interaction history with modern 0.6+ patterns
     """
 
-    def __init__(self, store: Optional[InMemoryStore] = None):
+    def __init__(self, store: Optional[Union[InMemoryStore, BaseStore]] = None):
         """
         Initialize store manager with LangGraph store
 
@@ -47,8 +49,8 @@ class StoreManager:
                 namespace="user_memory",
                 key=user_id
             )
-            
-            if memory_data:
+
+            if memory_data and memory_data.value:
                 return LongTermMemory(**memory_data.value)
             return None
 
@@ -66,21 +68,21 @@ class StoreManager:
         """
         try:
             memory.last_updated = datetime.now()
-            
+
             await self.store.aput(
                 namespace="user_memory",
                 key=user_id,
                 value=memory.dict()
             )
-            
+
             self.logger.info(f"Saved user memory for {user_id}")
 
         except Exception as e:
             self.logger.error(f"Failed to save user memory: {e}")
 
     async def update_user_profile(
-        self, 
-        user_id: str, 
+        self,
+        user_id: str,
         profile_updates: Dict[str, Any]
     ):
         """
@@ -116,7 +118,7 @@ class StoreManager:
 
         # Add timestamp to interaction
         interaction["timestamp"] = datetime.now().isoformat()
-        
+
         # Add to history (keep last 100 interactions)
         memory.interaction_history.append(interaction)
         if len(memory.interaction_history) > 100:

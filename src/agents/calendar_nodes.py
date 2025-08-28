@@ -9,6 +9,8 @@ from langgraph.types import interrupt
 from langsmith import traceable
 import structlog
 
+from .human_feedback_processor import format_feedback_for_processing, human_feedback_processor_node
+
 from ..models.state import AgentState
 from .calendar_agent import CalendarAgent
 
@@ -16,7 +18,7 @@ logger = structlog.get_logger()
 
 
 @traceable(name="calendar_analysis_node", tags=["calendar", "analysis", "node"])
-async def calendar_analysis_node(state: AgentState) -> AgentState:
+async def calendar_analysis_node(state: AgentState) -> Dict[str, Any]:
     """
     Node that analyzes calendar availability.
     Uses CalendarAgent to check for conflicts and suggest alternatives.
@@ -25,10 +27,11 @@ async def calendar_analysis_node(state: AgentState) -> AgentState:
 
     try:
         agent = CalendarAgent()
-        state = await agent.analyze_availability(state)
+        result = await agent.analyze_availability(state)
 
         # Log the booking intent for debugging
-        booking_intent = state.response_metadata.get("booking_intent", {})
+        response_metadata = result.get("response_metadata", state.response_metadata)
+        booking_intent = response_metadata.get("booking_intent", {})
         if booking_intent.get("ready_to_book"):
             logger.info("✅ Analysis complete: Slot available, ready for booking approval")
         elif booking_intent.get("slot_available") is False:
@@ -36,16 +39,18 @@ async def calendar_analysis_node(state: AgentState) -> AgentState:
         else:
             logger.info("ℹ️ Analysis complete: Not a booking request")
 
-        return state
+        return result
 
     except Exception as e:
         logger.error(f"Calendar analysis failed: {e}", exc_info=True)
-        state.add_error(f"Calendar analysis error: {str(e)}")
-        return state
+        return {
+            "error_messages": [f"Calendar analysis error: {str(e)}"],
+            "status": "error"
+        }
 
 
 @traceable(name="human_booking_review_node", tags=["calendar", "human_review", "node"])
-async def human_booking_review_node(state: AgentState) -> AgentState:
+async def human_booking_review_node(state: AgentState) -> Dict[str, Any]:
     """
     Node that interrupts for human approval before booking.
     Presents booking details and waits for human decision.
@@ -58,8 +63,9 @@ async def human_booking_review_node(state: AgentState) -> AgentState:
     # Check if booking is actually needed
     if not booking_intent.get("ready_to_book", False):
         logger.info("No booking approval needed - skipping human review")
-        state.response_metadata["booking_approved"] = False
-        return state
+        return {
+            "response_metadata": {**state.response_metadata, "booking_approved": False}
+        }
 
     # Format the datetime nicely
     try:
@@ -105,30 +111,65 @@ Would you like to proceed with creating this calendar event?"""
         "description": f"Approve calendar booking for {formatted_time}"
     })
 
-    # Process the human response
-    booking_approved = _process_human_booking_response(human_response, state)
-    state.response_metadata["booking_approved"] = booking_approved
+    # Format human response for the feedback processor
+    pending_feedback = format_feedback_for_processing(
+        human_response,
+        source_node="calendar_booking_review",
+        action_context=f"Calendar booking approval for {requirements.get('subject', 'meeting')} on {short_time}"
+    )
 
+    # Process the feedback with LLM
+    feedback_result = await human_feedback_processor_node({
+        "pending_human_feedback": pending_feedback,
+        "email": state.email.dict() if state.email else {}
+    })
+
+    # Extract decision from processed feedback
+    feedback_metadata = feedback_result.get("response_metadata", {}).get("human_feedback_processed", {})
+    decision = feedback_metadata.get("decision", "unclear")
+    booking_approved = decision == "approved"
+
+    # Update response metadata
+    updated_response_metadata = {**state.response_metadata, "booking_approved": booking_approved}
+    updated_response_metadata.update(feedback_result.get("response_metadata", {}))
+
+    # Prepare return with processed feedback messages and agent output
+    result_updates = {
+        "response_metadata": updated_response_metadata
+    }
+
+    # Add the LLM-processed messages to the result
+    if "messages" in feedback_result:
+        result_updates["messages"] = feedback_result["messages"]
+
+    # Add agent output based on decision
+    from ..models.state import AgentOutput
     if booking_approved:
         logger.info("✅ Human APPROVED the booking")
-        state.add_agent_output(
+        agent_output = AgentOutput(
             agent="human_booking_review",
             message=f"Booking approved for: {requirements.get('subject')}",
-            confidence=1.0
+            confidence=1.0,
+            data=feedback_metadata
         )
     else:
-        logger.info("❌ Human REJECTED the booking")
-        state.add_agent_output(
-            agent="human_booking_review", 
-            message="Calendar booking cancelled by user",
-            confidence=1.0
+        logger.info("❌ Human REJECTED/MODIFIED the booking")
+        agent_output = AgentOutput(
+            agent="human_booking_review",
+            message=f"Calendar booking decision: {decision}",
+            confidence=1.0,
+            data=feedback_metadata
         )
 
-    return state
+    result_updates["output"] = [agent_output]
+
+    return result_updates
+
+
 
 
 @traceable(name="calendar_booking_node", tags=["calendar", "booking", "node"])
-async def calendar_booking_node(state: AgentState) -> AgentState:
+async def calendar_booking_node(state: AgentState) -> Dict[str, Any]:
     """
     Node that creates the actual calendar event.
     Only executed after human approval.
@@ -136,71 +177,62 @@ async def calendar_booking_node(state: AgentState) -> AgentState:
     logger.info("📅 Calendar Booking Node - Creating event")
 
     # Double-check approval
-    if not state.response_metadata.get("booking_approved", False):
+    response_metadata = state.response_metadata
+    if not response_metadata.get("booking_approved", False):
         logger.warning("Booking node called without approval - skipping")
-        state.add_error("Cannot book without approval")
-        return state
+        return {
+            "error_messages": ["Cannot book without approval"],
+            "status": "error"
+        }
 
     try:
         agent = CalendarAgent()
-        state = await agent.create_event(state)
+        result = await agent.create_event(state)
 
         # Log success
-        if state.calendar_data and state.calendar_data.booked_event:
+        calendar_data = result.get("calendar_data")
+        if calendar_data and hasattr(calendar_data, 'booked_event') and calendar_data.booked_event:
             logger.info("✅ Calendar event created successfully")
 
             # Add user-friendly message
-            booking_intent = state.response_metadata.get("booking_intent", {})
+            booking_intent = response_metadata.get("booking_intent", {})
             requirements = booking_intent.get("requirements", {})
-            state.add_agent_output(
-                agent="calendar_booking",
-                message=f"✅ Meeting '{requirements.get('subject', 'Meeting')}' has been scheduled",
-                confidence=1.0
-            )
+
+            from ..models.state import AgentOutput
+            output_update = {
+                "output": [AgentOutput(
+                    agent="calendar_booking",
+                    message=f"✅ Meeting '{requirements.get('subject', 'Meeting')}' has been scheduled",
+                    confidence=1.0
+                )]
+            }
+            result.update(output_update)
         else:
             logger.error("Failed to create calendar event")
 
-        return state
+        return result
 
     except Exception as e:
         logger.error(f"Calendar booking failed: {e}", exc_info=True)
-        state.add_error(f"Booking error: {str(e)}")
-        return state
+        return {
+            "error_messages": [f"Booking error: {str(e)}"],
+            "status": "error"
+        }
 
 
 def _process_human_booking_response(human_response: Any, state: AgentState) -> bool:
     """
-    Process the human response from the interrupt.
-    Returns True if booking is approved, False otherwise.
+    Legacy function - now just determines approval status for backward compatibility
+    The detailed feedback processing is handled by human_feedback_processor
     """
-    # Handle list responses (Agent Inbox can return updates as a list)
     if isinstance(human_response, list):
         human_response = human_response[-1] if human_response else None
 
     if not human_response:
-        logger.warning("No human response received - defaulting to reject")
         return False
 
     if isinstance(human_response, dict):
         response_type = human_response.get("type", "ignore")
+        return response_type == "accept"
 
-        if response_type == "accept":
-            return True
-        elif response_type == "ignore":
-            return False
-        elif response_type in ["response", "edit"]:
-            # Future enhancement: Handle modifications
-            response_args = human_response.get("args", {})
-            if response_args:
-                state.human_feedback = (
-                    response_args if isinstance(response_args, str)
-                    else response_args.get("feedback", "")
-                )
-                logger.info(f"Human provided modifications: {state.human_feedback}")
-            return False  # For now, treat modifications as rejection
-        else:
-            logger.warning(f"Unknown response type: {response_type}")
-            return False
-    else:
-        logger.warning(f"Unexpected response format: {type(human_response)}")
-        return False
+    return False

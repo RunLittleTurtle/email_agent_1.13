@@ -3,6 +3,7 @@ Calendar Subgraph
 Orchestrates the calendar workflow with human approval for bookings
 """
 
+from typing import Dict, Any
 from langgraph.graph import StateGraph, END
 from langsmith import traceable
 import structlog
@@ -16,6 +17,15 @@ from .calendar_nodes import (
 from .calendar_llm_router import CalendarLLMRouter
 
 logger = structlog.get_logger()
+
+
+def _get_state_value(state, key, default=None):
+    """Helper to get values from both Dict and AgentState objects"""
+    if isinstance(state, dict):
+        return state.get(key, default)
+    else:
+        # AgentState object - access attribute directly
+        return getattr(state, key, default)
 
 
 def create_calendar_subgraph() -> StateGraph:
@@ -79,13 +89,13 @@ def create_calendar_subgraph() -> StateGraph:
 
 
 @traceable(name="llm_routing_node", tags=["calendar", "llm_routing", "node"])
-async def llm_routing_node(state: AgentState) -> AgentState:
+async def llm_routing_node(state: AgentState) -> Dict[str, Any]:
     """
     Node that uses LLM to determine routing after calendar analysis.
     Makes the intelligent routing decision and stores it in state.
     """
     logger.info("🤖 LLM Routing Node - Starting LLM-based routing decision")
-    
+
     try:
         # Initialize LLM router
         logger.info("📝 Initializing CalendarLLMRouter...")
@@ -94,39 +104,40 @@ async def llm_routing_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Failed to initialize CalendarLLMRouter: {e}", exc_info=True)
         # Fallback to exit route
-        state.response_metadata["llm_routing_decision"] = "exit"
-        return state
-    
+        return {
+            "response_metadata": {**state.response_metadata, "llm_routing_decision": "exit"}
+        }
+
     # Get data needed for routing decision
     logger.info("📊 Extracting data from state...")
     booking_intent = state.response_metadata.get("booking_intent", {})
     requirements = booking_intent.get("requirements", {})
     logger.info(f"📋 Requirements: {requirements}")
-    
+
     # Get calendar data from analysis - clean it for LLM router
     calendar_data = {}
-    if state.calendar_data:
+    calendar_data_obj = _get_state_value(state, "calendar_data")
+    if calendar_data_obj:
         # Only include suggested_times if there are actual conflicts
-        booking_intent = state.response_metadata.get("booking_intent", {})
         is_available = booking_intent.get("slot_available", False)
-        
+
         calendar_data = {
             "availability_status": state.calendar_data.availability_status,
             "action_taken": state.calendar_data.action_taken,
             "conflicts": state.calendar_data.conflicts,
             "availability": state.calendar_data.availability
         }
-        
+
         # Only include suggested_times if slot is NOT available (indicating real conflicts)
         if not is_available:
             calendar_data["suggested_times"] = state.calendar_data.suggested_times
         else:
             calendar_data["suggested_times"] = []  # Clear suggested times for available slots
-            
+
         logger.info(f"📅 Calendar data (cleaned for LLM): {calendar_data}")
     else:
         logger.warning("⚠️ No calendar_data found in state")
-    
+
     # Get the analysis output from the last output message
     analysis_output = ""
     if state.output and len(state.output) > 0:
@@ -135,7 +146,7 @@ async def llm_routing_node(state: AgentState) -> AgentState:
         logger.info(f"💬 Analysis output: {analysis_output[:200]}...")
     else:
         logger.warning("⚠️ No output messages found in state")
-    
+
     # Use LLM to make routing decision
     logger.info("🧠 Calling LLM router for decision...")
     decision = await llm_router.decide_availability_route(
@@ -144,21 +155,24 @@ async def llm_routing_node(state: AgentState) -> AgentState:
         requirements=requirements
     )
     logger.info(f"✅ LLM decision received: {decision}")
-    
+
     # Update booking intent with LLM decision
-    state.response_metadata["booking_intent"].update({
+    updated_booking_intent = {**booking_intent}
+    updated_booking_intent.update({
         "ready_to_book": decision.get("ready_to_book", False),
         "slot_available": decision.get("slot_available", False),
         "alternatives": decision.get("detected_conflicts", []),
         "llm_confidence": decision.get("confidence", 0.0),
         "llm_reason": decision.get("reason", "")
     })
-    
+
     route = decision.get("route", "exit")
-    
+
     # Store the routing decision for the conditional edge to use
-    state.response_metadata["llm_routing_decision"] = route
-    
+    updated_response_metadata = {**state.response_metadata}
+    updated_response_metadata["booking_intent"] = updated_booking_intent
+    updated_response_metadata["llm_routing_decision"] = route
+
     if route == "review":
         logger.info(f"✅ LLM Router: No conflict detected - will route to human review (confidence: {decision.get('confidence', 0.0)})")
     else:
@@ -166,12 +180,14 @@ async def llm_routing_node(state: AgentState) -> AgentState:
         if not decision.get("slot_available", True):
             logger.info(f"⚠️ LLM Router: Conflict detected - will exit to supervisor (reason: {decision.get('reason', '')[:100]})")
             # Ensure the supervisor knows about the conflict
-            state.response_metadata["calendar_conflict"] = True
-            state.response_metadata["calendar_alternatives"] = decision.get("detected_conflicts", [])
+            updated_response_metadata["calendar_conflict"] = True
+            updated_response_metadata["calendar_alternatives"] = decision.get("detected_conflicts", [])
         else:
             logger.info(f"ℹ️ LLM Router: Not a booking request - will exit to supervisor (reason: {decision.get('reason', '')[:100]})")
-    
-    return state
+
+    return {
+        "response_metadata": updated_response_metadata
+    }
 
 
 @traceable(name="route_after_llm_decision", tags=["calendar", "routing"])
@@ -199,13 +215,11 @@ def route_after_human_review(state: AgentState) -> str:
         return "book"
     else:
         logger.info("❌ Booking not approved - exiting to supervisor")
-        # Mark that booking was rejected for supervisor awareness
-        state.response_metadata["booking_rejected"] = True
         return "exit"
 
 
 # Optional: Export a convenience function for backward compatibility
-async def calendar_node(state: AgentState) -> AgentState:
+async def calendar_node(state: AgentState) -> Dict[str, Any]:
     """
     Legacy node function that uses the subgraph.
     This allows gradual migration from the old single-node approach.

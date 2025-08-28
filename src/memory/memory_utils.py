@@ -50,7 +50,7 @@ class MemoryUtils:
             memory = await self.store_manager.get_user_memory(user_id)
             if memory:
                 state.long_term_memory = memory
-                
+
                 # Add memory insights to dynamic context
                 state.add_insight(f"Loaded memory for user {user_id}")
                 if memory.user_profile:

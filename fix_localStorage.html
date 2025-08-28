@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fix Agent Inbox Configuration</title>
+</head>
+<body>
+    <h1>Agent Inbox Configuration Fix</h1>
+    <button onclick="fixConfig()">Fix Configuration</button>
+    <div id="status"></div>
+    
+    <script>
+        function fixConfig() {
+            try {
+                // Clear existing wrong configuration
+                localStorage.removeItem('inbox:agent_inboxes');
+                localStorage.removeItem('inbox:backfill_complete');
+                
+                // Set correct configuration
+                const correctConfig = [{
+                    "id": "9542b078-4ba2-5911-8d76-2a557139215b",
+                    "graphId": "email_agent", 
+                    "deploymentUrl": "http://127.0.0.1:2024",
+                    "name": "Email Agent",
+                    "selected": true,
+                    "createdAt": new Date().toISOString()
+                }];
+                
+                localStorage.setItem('inbox:agent_inboxes', JSON.stringify(correctConfig));
+                
+                document.getElementById('status').innerHTML = 
+                    '<p style="color: green;">✅ Configuration fixed! You can now go to <a href="http://localhost:3000">Agent Inbox</a></p>';
+                    
+            } catch (error) {
+                document.getElementById('status').innerHTML = 
+                    '<p style="color: red;">❌ Error: ' + error.message + '</p>';
+            }
+        }
+        
+        // Auto-fix on load
+        window.onload = function() {
+            fixConfig();
+        };
+    </script>
+</body>
+</html>

@@ -54,15 +54,14 @@ class CalendarAgent(BaseAgent):
         return tools
 
     @traceable(name="calendar_analyze", tags=["calendar", "analysis"])
-    async def analyze_availability(self, state: AgentState) -> AgentState:
+    async def analyze_availability(self, state: AgentState) -> Dict[str, Any]:
         """
         Analyze calendar request and check availability.
         Does NOT create any events - only checks and reports.
         """
         try:
             if not state.extracted_context:
-                state.add_error("No extracted context for calendar processing")
-                return state
+                return state.add_error("No extracted context for calendar processing")
 
             self.logger.info("Analyzing calendar request for availability")
 
@@ -70,14 +69,12 @@ class CalendarAgent(BaseAgent):
             requirements = await self._extract_calendar_requirements(state)
 
             if not requirements or not requirements.get("is_meeting_request"):
-                state.add_error("No meeting request found in email")
-                return state
+                return state.add_error("No meeting request found in email")
 
             # Get MCP tools
             tools = await self._get_mcp_tools()
             if not tools:
-                state.add_error("No MCP tools available")
-                return state
+                return state.add_error("No MCP tools available")
 
             # Execute availability check
             result = await self._check_availability(requirements, tools)
@@ -122,18 +119,15 @@ class CalendarAgent(BaseAgent):
             self.logger.info(f"Calendar analysis complete - ready_to_book: {state.response_metadata['booking_intent']['ready_to_book']}, slot_available: {is_available}")
             self.logger.info("LLM router will make final routing decision")
 
-            # Add AI response to state
-            self._add_analysis_to_state(state, result, parsed_result)
-
-            return state
+            # Add AI response to state and return updates
+            return self._add_analysis_to_state(state, result, parsed_result)
 
         except Exception as e:
             self.logger.error(f"Calendar analysis failed: {e}", exc_info=True)
-            state.add_error(f"Calendar analysis error: {str(e)}")
-            return state
+            return state.add_error(f"Calendar analysis error: {str(e)}")
 
     @traceable(name="calendar_book", tags=["calendar", "booking"])
-    async def create_event(self, state: AgentState) -> AgentState:
+    async def create_event(self, state: AgentState) -> Dict[str, Any]:
         """
         Create calendar event after human approval.
         This method assumes availability has been confirmed and approved.
@@ -145,14 +139,12 @@ class CalendarAgent(BaseAgent):
             requirements = booking_intent.get("requirements", {})
 
             if not requirements:
-                state.add_error("No booking requirements found")
-                return state
+                return state.add_error("No booking requirements found")
 
             # Get MCP tools
             tools = await self._get_mcp_tools()
             if not tools:
-                state.add_error("No MCP tools available for booking")
-                return state
+                return state.add_error("No MCP tools available for booking")
 
             # Execute booking
             result = await self._book_event(requirements, tools)
@@ -179,22 +171,30 @@ class CalendarAgent(BaseAgent):
 
             # CRITICAL: Add the full booking response to messages and output
             if booking_response:
-                # Add AI message to state.messages for downstream agents
+                # Create AI message and agent output for state updates
                 from langchain_core.messages import AIMessage
                 ai_message = AIMessage(
                     content=booking_response,
                     name="calendar_agent"
                 )
-                state.messages.append(ai_message)
-                
-                # Add structured output using new AgentOutput model
-                state.add_agent_output(
+
+                # Prepare state updates
+                state_updates = {
+                    "messages": [ai_message],
+                    "calendar_data": state.calendar_data
+                }
+
+                # Add agent output updates
+                output_updates = state.add_agent_output(
                     agent="calendar_agent",
                     message=booking_response,
                     confidence=1.0,
                     data=parsed_result,
                     tools_used=["google_calendar"]
                 )
+                state_updates.update(output_updates)
+
+                return state_updates
 
                 self.logger.info(f"✅ Added booking response to state: {booking_response[:100]}...")
                 self.logger.info(f"Output now has {len(state.output)} entries")
@@ -212,25 +212,41 @@ class CalendarAgent(BaseAgent):
                         name="calendar_agent"
                     )
                     state.messages.append(ai_message)
-                    
-                    # Add structured output
-                    state.add_agent_output(
+
+                    # Create AI message and prepare state updates
+                    from langchain_core.messages import AIMessage
+                    ai_message = AIMessage(
+                        content=fallback_msg,
+                        name="calendar_agent"
+                    )
+
+                    state_updates = {
+                        "messages": [ai_message],
+                        "calendar_data": state.calendar_data
+                    }
+
+                    # Add agent output updates
+                    output_updates = state.add_agent_output(
                         agent="calendar_agent",
                         message=fallback_msg,
                         confidence=0.8,
                         data=parsed_result,
                         tools_used=["google_calendar"]
                     )
-                else:
-                    state.add_error("Failed to create calendar event - no confirmation received")
-                    self.logger.error("Failed to create calendar event")
+                    state_updates.update(output_updates)
 
-            return state
+                    return state_updates
+                else:
+                    self.logger.error("Failed to create calendar event")
+                    return state.add_error("Failed to create calendar event - no confirmation received")
+
+            # Update calendar data and return state updates
+            state.calendar_data = state.calendar_data
+            return {"calendar_data": state.calendar_data}
 
         except Exception as e:
             self.logger.error(f"Calendar booking failed: {e}", exc_info=True)
-            state.add_error(f"Booking error: {str(e)}")
-            return state
+            return state.add_error(f"Booking error: {str(e)}")
 
     async def _check_availability(self, requirements: Dict[str, Any], tools: List) -> Dict:
         """Check calendar availability without booking"""
@@ -526,12 +542,12 @@ Return JSON:
 
         return None
 
-    def _add_analysis_to_state(self, state: AgentState, result: Dict, parsed_result: Dict):
-        """Add analysis results to state messages and output"""
+    def _add_analysis_to_state(self, state: AgentState, result: Dict, parsed_result: Dict) -> Dict[str, Any]:
+        """Add analysis results to state messages and output - returns state updates"""
         messages_list = result.get("messages", [])
         if messages_list and hasattr(messages_list[-1], 'content'):
             full_ai_response = messages_list[-1].content
-            
+
             # Add AI message to state.messages for downstream agents
             from langchain_core.messages import AIMessage
             ai_message = AIMessage(
@@ -539,22 +555,32 @@ Return JSON:
                 name="calendar_agent"
             )
             state.messages.append(ai_message)
-            
-            # Add structured output using new AgentOutput model
-            state.add_agent_output(
+
+            # Create AI message and prepare state updates
+            state_updates = {
+                "messages": [ai_message],
+                "calendar_data": state.calendar_data
+            }
+
+            # Add agent output updates
+            output_updates = state.add_agent_output(
                 agent="calendar_agent",
                 message=full_ai_response,
                 confidence=0.9,
                 data=parsed_result,
                 tools_used=["google_calendar"]
             )
-            
+            state_updates.update(output_updates)
+
             self.logger.info(f"✅ Added calendar analysis to state: {full_ai_response[:100]}...")
+
+            return state_updates
         else:
             self.logger.warning("No AI response found in calendar analysis result")
+            return {"calendar_data": state.calendar_data}
 
     # Backward compatibility method
     @traceable(name="calendar_agent_process", tags=["agent", "calendar"])
-    async def process(self, state: AgentState) -> AgentState:
+    async def process(self, state: AgentState) -> Dict[str, Any]:
         """Legacy method for backward compatibility - redirects to analyze_availability"""
         return await self.analyze_availability(state)

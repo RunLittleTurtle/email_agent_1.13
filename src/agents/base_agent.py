@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 import logging
 from datetime import datetime
 import time
+import json
+from typing import Any
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -81,79 +83,264 @@ class BaseAgent(ABC):
         pass
 
     @traceable(name="agent_invoke", tags=["agent"])
-    async def ainvoke(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> AgentState:
+    async def ainvoke(self, state: AgentState, runtime: Optional[Runtime[RuntimeContext]] = None) -> Dict[str, Any]:
         """
-        Modern LangGraph 0.6+ invoke pattern with context support.
-        This wraps the process method with common functionality.
+        Modern LangGraph 0.6+ invoke pattern with comprehensive state tracking.
+        This wraps the process method with full LangSmith visibility.
 
         Args:
             state: Current workflow state
             runtime: Runtime context with user preferences, tools, etc.
 
         Returns:
-            Updated workflow state
+            State updates dictionary for reducers
         """
         start_time = time.time()
-        self.logger.info(f"Starting {self.name} processing")
+
+        # === COMPREHENSIVE INPUT STATE TRACKING ===
+        input_summary = self._serialize_state_for_tracking(state)
+        runtime_summary = self._serialize_runtime_for_tracking(runtime)
+
+        self.logger.info(
+            f"🎯 Starting {self.name} processing",
+            agent=self.name,
+            input_state_keys=list(input_summary.keys()),
+            has_email=bool(state.email),
+            has_context=bool(state.extracted_context),
+            message_count=len(state.messages),
+            current_phase=state.dynamic_context.current_phase if state.dynamic_context else "none",
+            execution_step=state.dynamic_context.execution_step if state.dynamic_context else 0,
+            runtime_context=bool(runtime)
+        )
 
         try:
-            # Update current agent and execution context
-            state.current_agent = self.name
-            state.update_dynamic_context(
-                execution_step=state.dynamic_context.execution_step + 1,
-                current_phase=f"{self.name}_processing"
-            )
+            # === PRE-PROCESSING STATE CAPTURE ===
+            pre_processing_state = {
+                "agent": self.name,
+                "timestamp": datetime.now().isoformat(),
+                "input_state": input_summary,
+                "runtime_context": runtime_summary,
+                "execution_metadata": {
+                    "step": state.dynamic_context.execution_step if state.dynamic_context else 0,
+                    "phase": state.dynamic_context.current_phase if state.dynamic_context else "unknown"
+                }
+            }
 
-            # Process state and get updates
-            updates = await self.process(state, runtime)
-            
-            # Apply updates to state
-            for key, value in updates.items():
-                if key == "messages" and isinstance(value, list):
-                    # LangGraph will handle message merging via add_messages reducer
-                    state.messages.extend(value)
-                elif hasattr(state, key):
-                    setattr(state, key, value)
+            # Process state and get updates with full tracking
+            self.logger.info(f"🔄 {self.name} calling process method")
+            updates = await self.process(state, runtime) or {}
 
             # Calculate execution time
             execution_time = time.time() - start_time
-            
-            # Create rich agent output
-            state.add_agent_output(
+
+            # === POST-PROCESSING STATE TRACKING ===
+            self.logger.info(
+                f"✅ {self.name} process completed",
+                duration=execution_time,
+                updates_applied=list(updates.keys()),
+                update_count=len(updates)
+            )
+
+            # Prepare all state updates for reducers with enhanced tracking
+            state_updates = {}
+
+            # Add current agent
+            state_updates["current_agent"] = self.name
+
+            # Add enhanced context updates with full tracking
+            context_updates = state.update_dynamic_context(
+                execution_step=state.dynamic_context.execution_step + 1 if state.dynamic_context else 1,
+                current_phase=f"{self.name}_completed",
+                accumulated_insights=[f"{self.name} processed at {datetime.now().isoformat()}"]
+            )
+            state_updates.update(context_updates)
+
+            # Add agent processing updates
+            state_updates.update(updates)
+
+            # Add comprehensive agent output with full state tracking
+            output_updates = state.add_agent_output(
                 agent=self.name,
-                message=f"{self.name} completed successfully",
+                message=f"{self.name} completed successfully with {len(updates)} state updates",
                 confidence=0.9,
                 execution_time=execution_time,
-                data={"updates_applied": list(updates.keys())}
+                data={
+                    "updates_applied": list(updates.keys()),
+                    "pre_processing_state": pre_processing_state,
+                    "processing_results": self._serialize_updates_for_tracking(updates),
+                    "state_changes": {
+                        "before": input_summary,
+                        "changes": updates,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                },
+                input_context=pre_processing_state,
+                state_changes=updates,
+                next_recommendations=[f"State ready for next agent or {self.name} processing complete"]
             )
+            state_updates.update(output_updates)
 
-            # Log success
+            # === FINAL STATE LOGGING FOR LANGSMITH ===
             self.logger.info(
-                f"{self.name} completed successfully",
+                f"🎉 {self.name} completed successfully - FULL STATE TRACKED",
+                agent=self.name,
                 duration=execution_time,
-                updates=list(updates.keys())
+                updates=list(updates.keys()),
+                state_changes_count=len(updates),
+                execution_phase="completed",
+                langsmith_metadata={
+                    "agent_name": self.name,
+                    "execution_time": execution_time,
+                    "updates_count": len(updates),
+                    "success": True,
+                    "input_state_keys": list(input_summary.keys()),
+                    "output_state_keys": list(updates.keys())
+                }
             )
 
-            return state
+            return state_updates
 
         except Exception as e:
-            # Log error
+            execution_time = time.time() - start_time
+
+            # === COMPREHENSIVE ERROR TRACKING ===
             self.logger.error(
-                f"{self.name} failed",
+                f"❌ {self.name} failed - FULL ERROR TRACKED",
+                agent=self.name,
                 error=str(e),
+                error_type=type(e).__name__,
+                duration=execution_time,
+                input_state=input_summary,
+                runtime_context=runtime_summary,
+                langsmith_metadata={
+                    "agent_name": self.name,
+                    "execution_time": execution_time,
+                    "success": False,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                },
                 exc_info=True
             )
 
-            # Add error to state with rich context
-            state.add_error(f"{self.name} failed: {str(e)}")
-            state.add_agent_output(
+            # Prepare comprehensive error state updates for reducers
+            state_updates = {}
+
+            # Add current agent
+            state_updates["current_agent"] = self.name
+
+            # Add error updates with full context
+            error_updates = state.add_error(f"[{self.name}] {type(e).__name__}: {str(e)}")
+            state_updates.update(error_updates)
+
+            # Add comprehensive failed agent output
+            output_updates = state.add_agent_output(
                 agent=self.name,
-                message=f"{self.name} failed: {str(e)}",
+                message=f"{self.name} failed: {type(e).__name__}: {str(e)}",
                 confidence=0.0,
-                execution_time=time.time() - start_time,
-                errors=[str(e)]
+                execution_time=execution_time,
+                data={
+                    "error_details": {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "input_state": input_summary,
+                        "runtime_context": runtime_summary,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                },
+                errors=[f"{type(e).__name__}: {str(e)}"],
+                input_context={"error_occurred_during": "agent_processing"},
+                state_changes={"status": "error", "error_agent": self.name}
             )
-            return state
+            state_updates.update(output_updates)
+
+            return state_updates
+
+    def _serialize_state_for_tracking(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Serialize agent state for comprehensive tracking in LangSmith
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            Serialized state summary for logging
+        """
+        try:
+            return {
+                "has_email": bool(state.email),
+                "email_subject": state.email.subject if state.email else None,
+                "email_sender": state.email.sender if state.email else None,
+                "intent": state.intent.value if state.intent else None,
+                "extracted_context_available": bool(state.extracted_context),
+                "urgency_level": state.extracted_context.urgency_level if state.extracted_context else None,
+                "calendar_data_available": bool(state.calendar_data),
+                "document_data_available": bool(state.document_data),
+                "contact_data_available": bool(state.contact_data),
+                "draft_response_available": bool(state.draft_response),
+                "draft_length": len(state.draft_response) if state.draft_response else 0,
+                "message_count": len(state.messages),
+                "output_count": len(state.output),
+                "error_count": len(state.error_messages),
+                "current_agent": state.current_agent,
+                "status": state.status,
+                "workflow_id": state.workflow_id,
+                "dynamic_context": {
+                    "execution_step": state.dynamic_context.execution_step if state.dynamic_context else 0,
+                    "current_phase": state.dynamic_context.current_phase if state.dynamic_context else "unknown",
+                    "insights_count": len(state.dynamic_context.accumulated_insights) if state.dynamic_context else 0
+                },
+                "response_metadata_keys": list(state.response_metadata.keys()) if state.response_metadata else []
+            }
+        except Exception as e:
+            return {"serialization_error": str(e)}
+
+    def _serialize_runtime_for_tracking(self, runtime: Optional[Runtime[RuntimeContext]]) -> Dict[str, Any]:
+        """
+        Serialize runtime context for tracking
+
+        Args:
+            runtime: Runtime context
+
+        Returns:
+            Serialized runtime summary
+        """
+        if not runtime:
+            return {"runtime_available": False}
+
+        try:
+            return {
+                "runtime_available": True,
+                "has_user_id": hasattr(runtime, 'user_id'),
+                "user_id": getattr(runtime, 'user_id', None),
+                "context_type": str(type(runtime))
+            }
+        except Exception as e:
+            return {"runtime_available": True, "serialization_error": str(e)}
+
+    def _serialize_updates_for_tracking(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Serialize state updates for tracking
+
+        Args:
+            updates: State updates dictionary
+
+        Returns:
+            Serialized updates summary
+        """
+        try:
+            serialized = {}
+            for key, value in updates.items():
+                if isinstance(value, (str, int, float, bool, type(None))):
+                    serialized[key] = value
+                elif isinstance(value, list):
+                    serialized[key] = f"list_length_{len(value)}"
+                elif isinstance(value, dict):
+                    serialized[key] = f"dict_keys_{list(value.keys())}"
+                else:
+                    serialized[key] = f"object_{type(value).__name__}"
+            return serialized
+        except Exception as e:
+            return {"serialization_error": str(e)}
 
     def create_ai_message(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> AIMessage:
         """

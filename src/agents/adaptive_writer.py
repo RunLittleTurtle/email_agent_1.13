@@ -37,8 +37,7 @@ class AdaptiveWriterAgent(BaseAgent):
         """
         try:
             if not state.email:
-                state.add_error("No email to respond to")
-                return {"error_messages": ["No email to respond to"]}
+                return state.add_error("No email to respond to")
 
             self.logger.info("Generating email response")
 
